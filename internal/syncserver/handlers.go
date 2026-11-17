@@ -66,7 +66,7 @@ func (s *Server) handleGetChanges(w http.ResponseWriter, r *http.Request) {
 		var ir idxRow
 		var delInt int
 		if err := rows.Scan(&ir.id, &ir.seq, &delInt, &ir.at); err != nil {
-			rows.Close()
+			_ = rows.Close() // the read already failed; closing only frees the cursor
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -74,11 +74,14 @@ func (s *Server) handleGetChanges(w http.ResponseWriter, r *http.Request) {
 		idx = append(idx, ir)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close() // the read already failed; closing only frees the cursor
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	more := len(idx) > limit
 	if more {
@@ -160,7 +163,8 @@ func (s *Server) handlePostChanges(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())
 		return
 	}
-	defer body.Close()
+	// Closing a request body only frees it; nothing is lost on error.
+	defer func() { _ = body.Close() }()
 	var req syncwire.PushRequest
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())

@@ -56,7 +56,8 @@ func (s *Server) doImport(w http.ResponseWriter, r *http.Request, wireLimit, dec
 		httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())
 		return
 	}
-	defer body.Close()
+	// Closing a request body only frees it; nothing is lost on error.
+	defer func() { _ = body.Close() }()
 
 	// Spool the whole bounded, decompressed archive into memory BEFORE
 	// applying anything. fullexport.Read applies each entry to its store as

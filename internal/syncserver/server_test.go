@@ -46,7 +46,7 @@ func doReq(t *testing.T, client *http.Client, method, url, bearer string, body [
 func TestHealthzIsUnauthenticated(t *testing.T) {
 	client, base := testServer(t, "s3cret")
 	resp := doReq(t, client, http.MethodGet, base+"/healthz", "", nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // closing a read body loses nothing
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz status = %d, want 200", resp.StatusCode)
 	}
@@ -62,7 +62,9 @@ func TestChangesRequiresAuth(t *testing.T) {
 		{"wrong", "nope"},
 	} {
 		resp := doReq(t, client, http.MethodGet, base+"/v1/repos/repo1/changes?since=0", tc.bearer, nil)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s: status = %d, want 401", tc.name, resp.StatusCode)
 		}
@@ -80,7 +82,7 @@ func TestPushRejectsInvalidRepoKey(t *testing.T) {
 	client, base := testServer(t, "s3cret")
 	body, _ := json.Marshal(syncwire.PushRequest{})
 	resp := doReq(t, client, http.MethodPost, base+"/v1/repos/bad!key/changes", "s3cret", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // closing a read body loses nothing
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid key: status = %d, want 400", resp.StatusCode)
 	}
@@ -100,7 +102,9 @@ func TestPushThenPullRoundTrip(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if pr.Accepted != 1 {
 		t.Fatalf("accepted = %d, want 1", pr.Accepted)
 	}
@@ -113,7 +117,9 @@ func TestPushThenPullRoundTrip(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(cr.Records) != 1 || cr.Records[0].ID != "m1" {
 		t.Fatalf("changes = %+v, want one record m1", cr)
 	}
@@ -133,7 +139,9 @@ func TestPushThenPullRoundTrip(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&cr2); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(cr2.Records) != 0 {
 		t.Fatalf("expected no new records past the cursor, got %+v", cr2.Records)
 	}
@@ -148,13 +156,21 @@ func TestPushIdempotentDoesNotBumpSeqTwice(t *testing.T) {
 
 	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var first syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&first)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	resp = doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var second syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&second)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	if second.Accepted != 0 {
 		t.Fatalf("re-pushing the identical record must accept 0 (Noop), got %d", second.Accepted)
@@ -185,8 +201,12 @@ func TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice(t *testing.T) {
 	body, _ := json.Marshal(syncwire.PushRequest{Records: []syncwire.Record{seed}})
 	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var seedResp syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&seedResp)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&seedResp); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if seedResp.Accepted != 1 {
 		t.Fatalf("seed: accepted = %d, want 1", seedResp.Accepted)
 	}
@@ -201,8 +221,12 @@ func TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice(t *testing.T) {
 
 	resp = doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var first syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&first)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if first.Accepted != 1 {
 		t.Fatalf("first push of the near-dup: accepted = %d, want 1", first.Accepted)
 	}
@@ -211,8 +235,12 @@ func TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice(t *testing.T) {
 	// response and retries).
 	resp = doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var second syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&second)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	if second.Accepted != 0 {
 		t.Fatalf("retrying an already-merged near-dup push must accept 0 (Noop), got %d", second.Accepted)
@@ -225,8 +253,12 @@ func TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice(t *testing.T) {
 	// The origin row must only have been reinforced once, not twice.
 	resp = doReq(t, client, http.MethodGet, url+"?since=0", "s3cret", nil)
 	var cr syncwire.ChangesResponse
-	json.NewDecoder(resp.Body).Decode(&cr)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	var origin *syncwire.Record
 	for i := range cr.Records {
 		if cr.Records[i].ID == "origin-1" {
@@ -251,7 +283,9 @@ func TestPushTombstonePropagatesAsDeletedChange(t *testing.T) {
 	}}
 	body, _ := json.Marshal(insert)
 	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	tomb := syncwire.PushRequest{Records: []syncwire.Record{
 		{ID: "m1", Deleted: true, UpdatedAt: 200},
@@ -259,16 +293,24 @@ func TestPushTombstonePropagatesAsDeletedChange(t *testing.T) {
 	body, _ = json.Marshal(tomb)
 	resp = doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var pr syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&pr)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if pr.Accepted != 1 {
 		t.Fatalf("tombstone push accepted = %d, want 1", pr.Accepted)
 	}
 
 	resp = doReq(t, client, http.MethodGet, url+"?since=0", "s3cret", nil)
 	var cr syncwire.ChangesResponse
-	json.NewDecoder(resp.Body).Decode(&cr)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	var found bool
 	for _, r := range cr.Records {
@@ -299,32 +341,48 @@ func TestChangesPaging(t *testing.T) {
 	body, _ := json.Marshal(syncwire.PushRequest{Records: recs})
 	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
 	var pr syncwire.PushResponse
-	json.NewDecoder(resp.Body).Decode(&pr)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if pr.Accepted != 5 {
 		t.Fatalf("accepted = %d, want 5", pr.Accepted)
 	}
 
 	resp = doReq(t, client, http.MethodGet, url+"?since=0&limit=2", "s3cret", nil)
 	var page1 syncwire.ChangesResponse
-	json.NewDecoder(resp.Body).Decode(&page1)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&page1); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(page1.Records) != 2 || !page1.More {
 		t.Fatalf("page1 = %+v, want 2 records and More=true", page1)
 	}
 
 	resp = doReq(t, client, http.MethodGet, url+"?since="+strconv.FormatInt(page1.Cursor, 10)+"&limit=2", "s3cret", nil)
 	var page2 syncwire.ChangesResponse
-	json.NewDecoder(resp.Body).Decode(&page2)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&page2); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(page2.Records) != 2 || !page2.More {
 		t.Fatalf("page2 = %+v, want 2 records and More=true", page2)
 	}
 
 	resp = doReq(t, client, http.MethodGet, url+"?since="+strconv.FormatInt(page2.Cursor, 10)+"&limit=2", "s3cret", nil)
 	var page3 syncwire.ChangesResponse
-	json.NewDecoder(resp.Body).Decode(&page3)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&page3); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(page3.Records) != 1 || page3.More {
 		t.Fatalf("page3 = %+v, want 1 record and More=false", page3)
 	}
@@ -365,7 +423,7 @@ func TestGzipCompressedPushBodyIsDecompressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // closing a read body loses nothing
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -379,7 +437,7 @@ func TestGzipCompressedPushBodyIsDecompressed(t *testing.T) {
 
 	// Confirm it actually landed, via an ordinary (non-gzip) pull.
 	resp2 := doReq(t, client, http.MethodGet, url+"?since=0", "s3cret", nil)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }() // closing a read body loses nothing
 	var cr syncwire.ChangesResponse
 	if err := json.NewDecoder(resp2.Body).Decode(&cr); err != nil {
 		t.Fatal(err)
@@ -402,7 +460,9 @@ func TestGzipResponseWhenAcceptEncodingRequested(t *testing.T) {
 		{ID: "m1", Kind: "learning", Title: "t", Body: "response gzip body", CreatedAt: 100, UpdatedAt: 100},
 	}})
 	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	req, err := http.NewRequest(http.MethodGet, url+"?since=0", nil)
 	if err != nil {
@@ -414,7 +474,7 @@ func TestGzipResponseWhenAcceptEncodingRequested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }() // closing a read body loses nothing
 	if resp2.Header.Get("Content-Encoding") != "gzip" {
 		t.Fatalf("Content-Encoding = %q, want gzip", resp2.Header.Get("Content-Encoding"))
 	}
@@ -422,7 +482,7 @@ func TestGzipResponseWhenAcceptEncodingRequested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer gzr.Close()
+	defer func() { _ = gzr.Close() }() // closing a read body loses nothing
 	raw, err := io.ReadAll(gzr)
 	if err != nil {
 		t.Fatal(err)
@@ -449,13 +509,15 @@ func TestRateLimitReturns429AfterBurstExceeded(t *testing.T) {
 	url := base + "/v1/repos/repo1/changes?since=0"
 	for i := range 2 {
 		resp := doReq(t, client, http.MethodGet, url, "wrongkey", nil)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("request %d: status = %d, want 401 (not yet rate limited)", i, resp.StatusCode)
 		}
 	}
 	resp := doReq(t, client, http.MethodGet, url, "wrongkey", nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // closing a read body loses nothing
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("3rd request: status = %d, want 429", resp.StatusCode)
 	}
@@ -470,7 +532,9 @@ func TestRateLimitDefaultBurstAllowsNormalTraffic(t *testing.T) {
 	url := base + "/v1/repos/repo1/changes?since=0"
 	for i := range 10 {
 		resp := doReq(t, client, http.MethodGet, url, "s3cret", nil)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("request %d: status = %d, want 200 (default burst should not throttle normal traffic)", i, resp.StatusCode)
 		}
