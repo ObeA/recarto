@@ -52,45 +52,13 @@ func damageAfter(t *testing.T, path string, off int64) {
 	}
 }
 
-func openAppIn(t *testing.T, cacheDir string, opts ...bool) *app.App {
+// buildCorruptWritePathStore writes 121 memories into the store openAppIn opens
+// in cacheDir, then damages the MinHash band index and the code graph written
+// after them, so a plain open and memory reads still succeed. It returns the
+// one memory recorded through record_memory.
+func buildCorruptWritePathStore(t *testing.T, cacheDir string) RecordMemoryOutput {
 	t.Helper()
-	t.Setenv("RECARTO_CACHE_DIR", cacheDir)
-	quick := len(opts) > 0 && opts[0]
-	a, err := app.Open(app.Config{
-		CWD:        "/repo",
-		Runner:     fakeGit{branch: "main"},
-		Clock:      clock.NewFake(time.UnixMilli(1_700_000_000_000)),
-		QuickCheck: quick,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a
-}
-
-// TestRecordMemoryOnACorruptStore is the reported bug, end to end minus the
-// transport: the store opens, reads serve fine all session, and then
-// record_memory fails with "database disk image is malformed (11)".
-//
-// The damage is aimed at the structures record_memory WRITES through — the
-// MinHash band index it consults for near-duplicate detection and the code
-// graph — while the memories table itself, written earlier, stays intact and
-// readable. That asymmetry is the whole reason the failure looked so strange in
-// the field.
-//
-// Two things must now be true. The failing call reports something the agent can
-// act on instead of a raw SQLite code — an in-session file swap under a live
-// connection pool is not safe, so this call cannot be healed in place. And the
-// next session (which `recarto serve` opens with the proactive check) starts on
-// a repaired store, so record_memory succeeds and the earlier memories are still
-// there.
-func TestRecordMemoryOnACorruptStore(t *testing.T) {
-	clearRecartoEnv(t)
-	t.Setenv("RECARTO_AUTO_REPAIR", "")
-	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
-	cacheDir := t.TempDir()
 	ctx := context.Background()
-
 	a := openAppIn(t, cacheDir)
 	path := a.Store.Path()
 
@@ -174,9 +142,51 @@ func TestRecordMemoryOnACorruptStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	damageAfter(t, path, memoriesEnd)
+	return preID
+}
+
+func openAppIn(t *testing.T, cacheDir string, opts ...bool) *app.App {
+	t.Helper()
+	t.Setenv("RECARTO_CACHE_DIR", cacheDir)
+	quick := len(opts) > 0 && opts[0]
+	a, err := app.Open(app.Config{
+		CWD:        "/repo",
+		Runner:     fakeGit{branch: "main"},
+		Clock:      clock.NewFake(time.UnixMilli(1_700_000_000_000)),
+		QuickCheck: quick,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TestRecordMemoryOnACorruptStore is the reported bug, end to end minus the
+// transport: the store opens, reads serve fine all session, and then
+// record_memory fails with "database disk image is malformed (11)".
+//
+// The damage is aimed at the structures record_memory WRITES through — the
+// MinHash band index it consults for near-duplicate detection and the code
+// graph — while the memories table itself, written earlier, stays intact and
+// readable. That asymmetry is the whole reason the failure looked so strange in
+// the field.
+//
+// Two things must now be true. The failing call reports something the agent can
+// act on instead of a raw SQLite code — an in-session file swap under a live
+// connection pool is not safe, so this call cannot be healed in place. And the
+// next session (which `recarto serve` opens with the proactive check) starts on
+// a repaired store, so record_memory succeeds and the earlier memories are still
+// there.
+func TestRecordMemoryOnACorruptStore(t *testing.T) {
+	clearRecartoEnv(t)
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	cacheDir := t.TempDir()
+	ctx := context.Background()
+	preID := buildCorruptWritePathStore(t, cacheDir)
 
 	// A session that started before the damage: it opened fine and its reads work.
-	a = openAppIn(t, cacheDir)
+	a := openAppIn(t, cacheDir)
 	var mem int
 	if err := a.Store.DB.QueryRow(`SELECT count(*) FROM memories`).Scan(&mem); err != nil {
 		t.Fatalf("memory reads should still work — this is not the reported scenario: %v", err)
@@ -184,7 +194,7 @@ func TestRecordMemoryOnACorruptStore(t *testing.T) {
 	if mem != 121 {
 		t.Fatalf("memories readable = %d, want 121", mem)
 	}
-	_, err = recordMemory(ctx, a, RecordMemoryInput{
+	_, err := recordMemory(ctx, a, RecordMemoryInput{
 		Kind: "learning",
 		Body: "a completely different subject, recorded while the store is damaged",
 	})

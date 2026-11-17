@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -87,5 +88,25 @@ func TestOpenBuildsGraphEngine(t *testing.T) {
 	a := newTestApp(t, "main")
 	if a.Graph == nil {
 		t.Fatal("App.Graph is nil")
+	}
+}
+
+func TestOpenContextInterruptsTheQuickCheck(t *testing.T) {
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	t.Setenv("RECARTO_WORKSPACE", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a, err := OpenContext(ctx, Config{
+		CWD:        "/repo",
+		Runner:     fakeGit{branch: "main"},
+		Clock:      clock.NewFake(time.UnixMilli(1_700_000_000_000)),
+		QuickCheck: true,
+	})
+	if err == nil {
+		_ = a.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenContext with a cancelled ctx = %v, want context.Canceled", err)
 	}
 }

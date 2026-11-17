@@ -136,7 +136,7 @@ func TestDoctorReportsConfig(t *testing.T) {
 	doctor := func(content string) (string, error) {
 		useConfig(t, content)
 		var out bytes.Buffer
-		err := Doctor(ctx, a, &out)
+		err := Doctor(ctx, a, &out, nil)
 		return out.String(), err
 	}
 	if out, err := doctor(""); err != nil || !strings.Contains(out, "[ok] config: all features on\n") {

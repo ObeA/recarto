@@ -257,7 +257,7 @@ func TestDoctorReportsLastRepair(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := Doctor(ctx, a, &buf); err != nil {
+	if err := Doctor(ctx, a, &buf, nil); err != nil {
 		t.Fatalf("doctor: %v\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -299,16 +299,20 @@ func TestDoctorHintsAtRepairWhenIntegrityFails(t *testing.T) {
 		}
 	}()
 
-	var buf bytes.Buffer
-	err = Doctor(ctx, a2, &buf)
-	if err == nil {
-		t.Fatalf("doctor passed on a corrupt store:\n%s", buf.String())
-	}
-	out := buf.String()
-	if !strings.Contains(out, "[FAIL] integrity") {
-		t.Errorf("expected a failed integrity check:\n%s", out)
-	}
-	if !strings.Contains(out, "recarto repair") {
-		t.Errorf("expected a repair hint:\n%s", out)
+	for _, tc := range []struct {
+		args []string
+		fail string
+	}{{nil, "[FAIL] integrity"}, {[]string{"--quick"}, "[FAIL] quick_check"}} {
+		var buf bytes.Buffer
+		if err := Doctor(ctx, a2, &buf, tc.args); err == nil {
+			t.Fatalf("doctor %v passed on a corrupt store:\n%s", tc.args, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, tc.fail) {
+			t.Errorf("doctor %v: expected %q:\n%s", tc.args, tc.fail, out)
+		}
+		if !strings.Contains(out, "recarto repair") {
+			t.Errorf("doctor %v: expected a repair hint:\n%s", tc.args, out)
+		}
 	}
 }

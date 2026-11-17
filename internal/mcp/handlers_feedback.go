@@ -41,7 +41,7 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 	// This handler is the only thing that opens the feedback store inside a
 	// long-lived `serve` process, so it carries the proactive corruption check
 	// (rate-limited to once a day by the store's stamp file).
-	b, err := feedback.Open(a.Clock, store.WithQuickCheck())
+	b, err := feedback.Open(a.Clock, store.WithQuickCheck(ctx))
 	if err != nil {
 		return ReportRecartoIssueOutput{}, err
 	}
