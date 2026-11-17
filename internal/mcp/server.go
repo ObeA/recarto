@@ -27,7 +27,7 @@ func NewServer(a *app.App) *sdk.Server {
 // change touches this file alone (the same isolation principle as the swappable
 // Lexical backend).
 func newServer(sv app.Served, get func(context.Context) (*app.App, error)) *sdk.Server {
-	s := sdk.NewServer(&sdk.Implementation{Name: "recarto", Version: version.Version}, nil)
+	s := sdk.NewServer(&sdk.Implementation{Name: "recarto", Version: version.Version}, &sdk.ServerOptions{Instructions: serverInstructions(sv.Features)})
 	f := sv.Features
 	if f.On(features.MemoryTools) {
 		// Without a workspace, record_memory has no scope and recall finds no
@@ -155,6 +155,18 @@ func Serve(ctx context.Context, cfg app.Config) error {
 func serve(ctx context.Context, sv app.Served, open func(context.Context) (*app.App, error), t sdk.Transport) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Hooks point at the MCP tools only while a server marks their repo
+	// (app.ServerRunning); marking before Run means every mark is held before
+	// the handshake can be answered.
+	for _, id := range sv.RepoIDs {
+		release, err := app.MarkServing(id)
+		if err != nil {
+			// Unmarked, that repo's hooks only leave out their pointers at the tools; serving matters more.
+			fmt.Fprintf(os.Stderr, "recarto: hooks will not point at the MCP tools: %v\n", err)
+			continue
+		}
+		defer release()
+	}
 	o := startOpen(ctx, open)
 	err := newServer(sv, o.get).Run(ctx, t)
 	// The cancel interrupts a running check, but an open in progress may be

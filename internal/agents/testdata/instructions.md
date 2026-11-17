@@ -2,6 +2,8 @@
 
 This repo uses **Recarto**: memory that persists across sessions (preferences, learnings, decisions, do-not-repeats, bugs) and a code graph.
 
+The tools named here are tools of the `recarto` MCP server. Your host may list them under that server's name, or load them only on demand: then load them by the name `recarto` before you call them.
+
 - **Record** learnings with `record_memory` and bug fixes with `record_bug`. Near-duplicates merge, so record freely.
 - **Anchor** each memory to the `files` or `symbols` it concerns: an anchored bug, do-not-repeat, decision or learning comes back when that code is read or edited. Without anchors, a memory only returns at session start or through recall.
 - **Record a `preference`** the moment the user corrects your approach, rejects a suggestion or states a style, workflow or naming choice. The bar is low.

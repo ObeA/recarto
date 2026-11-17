@@ -69,16 +69,21 @@ func TestInstructionsAllOnUnchanged(t *testing.T) {
 	}
 }
 
-func TestInstructionsFollowFeatures(t *testing.T) {
-	memoryNames := []string{
+// The names of the MCP tools each feature registers (mcp.NewServer).
+var (
+	memoryNames = []string{
 		"record_memory", "record_bug", "recall_memory", "search_bugs",
 		"get_memory", "list_memory", "complete_todo", "forget_memory",
 	}
-	graphNames := []string{
+	graphNames = []string{
 		"search_graph", "trace_call_path", "get_architecture", "query_graph",
 		"search_content", "get_code_snippet", "get_file_outline",
 		"find_implementations", "find_annotated", "find_references", "get_graph_delta",
 	}
+	toolNames = append(append(append([]string{}, memoryNames...), graphNames...), "report_recarto_issue")
+)
+
+func TestInstructionsFollowFeatures(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		f       features.Set
@@ -129,6 +134,11 @@ func TestInstructionsFollowFeatures(t *testing.T) {
 			}
 			if strings.Contains(got, "\n\n\n") {
 				t.Errorf("dropped parts left a hole:\n%s", got)
+			}
+			// Any tool named makes the block say whose tools they are.
+			serverNamed := strings.Contains(got, "`recarto` MCP server")
+			if want := tc.name != "memory-tools, graph-tools and issue-reports"; serverNamed != want {
+				t.Errorf("names the recarto MCP server = %v, want %v:\n%s", serverNamed, want, got)
 			}
 			for _, s := range tc.absent {
 				if strings.Contains(got, s) {

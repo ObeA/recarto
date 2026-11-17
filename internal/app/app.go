@@ -214,11 +214,18 @@ type Served struct {
 	Workspace bool
 	// Repos means RECARTO_REPOS adds at least one repo besides the primary.
 	Repos bool
+	// RepoIDs are the ids of the repos served, primary first, then
+	// RECARTO_REPOS; serve marks each running for the hooks (MarkServing).
+	RepoIDs []string
 }
 
 // Served returns what a offers.
 func (a *App) Served() Served {
-	return Served{Features: a.Features, Workspace: a.Workspace != nil, Repos: len(a.Repos) > 0}
+	ids := []string{a.Git.RepoID}
+	for _, rc := range a.Repos {
+		ids = append(ids, rc.Git.RepoID)
+	}
+	return Served{Features: a.Features, Workspace: a.Workspace != nil, Repos: len(a.Repos) > 0, RepoIDs: ids}
 }
 
 // Describe returns what an App opened with cfg would offer. It resolves
@@ -230,10 +237,16 @@ func Describe(cfg Config) (Served, error) {
 	if err != nil {
 		return Served{}, err
 	}
+	extras := extraRepos(gc.RepoID)
+	ids := []string{gc.RepoID}
+	for _, x := range extras {
+		ids = append(ids, x.RepoID)
+	}
 	return Served{
 		Features:  features.Load(),
 		Workspace: !cfg.SkipWorkspace && workspace.Name() != "",
-		Repos:     len(extraRepos(gc.RepoID)) > 0,
+		Repos:     len(extras) > 0,
+		RepoIDs:   ids,
 	}, nil
 }
 

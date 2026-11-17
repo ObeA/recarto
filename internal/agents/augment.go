@@ -260,8 +260,8 @@ func hintSymbols(ctx context.Context, a *app.App, repos []*app.RepoContext, name
 
 	const header = "Recarto: symbols named in your search:"
 	footer := ""
-	if a.Features.On(features.GraphTools) {
-		footer = "\nUse get_code_snippet to read one symbol instead of the whole file."
+	if toolFeatures(a).On(features.GraphTools) {
+		footer = "\nUse the recarto MCP tool `get_code_snippet` to read one symbol instead of the whole file."
 	}
 	size := len(header) + len(footer)
 	var b strings.Builder
@@ -291,8 +291,8 @@ func hintSymbols(ctx context.Context, a *app.App, repos []*app.RepoContext, name
 // size leaves of hintMax, and returns it with the ids it printed.
 func hintBugs(ctx context.Context, a *app.App, scope string, repos []*app.RepoContext, listed []hintHit, size int) (string, []string, error) {
 	header := "\nKnown bugs in this code"
-	if a.Features.On(features.MemoryTools) {
-		header += " (search_bugs for detail)"
+	if toolFeatures(a).On(features.MemoryTools) {
+		header += " (recarto MCP tool `search_bugs` for detail)"
 	}
 	header += ":"
 	var b strings.Builder

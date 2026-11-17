@@ -60,10 +60,25 @@ func clearRecartoEnv(t *testing.T) {
 	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 }
 
+// newTestApp opens a test App on branch with a clean RECARTO_* env. A Recarto
+// MCP server is marked running for its repo, as in a session whose server is
+// up, so hooks point at the MCP tools.
 func newTestApp(t *testing.T, branch string) *app.App {
 	t.Helper()
 	clearRecartoEnv(t)
-	return openTestApp(t, branch)
+	a := openTestApp(t, branch)
+	markServing(t, a)
+	return a
+}
+
+// markServing marks a Recarto MCP server running for a's repo until the test ends.
+func markServing(t *testing.T, a *app.App) {
+	t.Helper()
+	release, err := app.MarkServing(a.Git.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
 }
 
 // openTestApp is newTestApp without the env reset — for helpers that set

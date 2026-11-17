@@ -184,7 +184,7 @@ func TestFormatBugWarningsCutsFix(t *testing.T) {
 	if !strings.Contains(out, "fix: "+fix[:200]+"…") || strings.Contains(out, fix[:201]) {
 		t.Errorf("fix not cut to 200 runes:\n%s", out)
 	}
-	if !strings.HasSuffix(out, "(full text: get_memory id=m1)") {
+	if !strings.HasSuffix(out, "(full text: recarto MCP tool `get_memory`, id=m1)") {
 		t.Errorf("missing get_memory pointer:\n%s", out)
 	}
 	if out := formatBugWarnings("h.go", []*memory.Record{bug}, false); strings.Contains(out, "get_memory") {
