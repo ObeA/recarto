@@ -44,10 +44,14 @@ func TestSessionStartTiersFollowFeatures(t *testing.T) {
 	record(t, a, memory.KindLearning, "wal mode needs busy timeout", "")
 	record(t, a, memory.KindTodo, "split the handler file", "")
 	record(t, a, memory.KindBug, "reindex drops edges", "")
-	src := []byte("package p\n\nfunc Alpha() {}\n")
-	if err := a.Graph.IndexFile(ctx, a.Git.Worktree, "pkg/a.go", src, 1, int64(len(src))); err != nil {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "a.go"), []byte("package p\n\nfunc Alpha() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	finishIndex(t, a, root)
 	start := func(id string, f features.Set) string {
 		t.Helper()
 		a.Features = f

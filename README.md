@@ -223,6 +223,7 @@ recarto graph <sub>       query the code graph (search|grep|callers|callees|impl
                           graph annotated <Attribute>  (symbols decorated with [Attribute] / @decorator)
                           graph outline <file>  (a file's symbols/signatures/lines, instead of reading it)
 recarto compact           prune/decay memory + drop the graph of dead and unused worktrees (--force --dry-run --budget-tokens --vacuum)
+recarto warm              index this worktree and the served repos, drop dead and unused worktrees' graphs (session start runs it in the background)
 recarto repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
@@ -299,7 +300,7 @@ What session start adds, by its `source`:
 | `compact` | The full block, after forgetting the conversation's reads, notes and searches. Its memories count as shown again. |
 | `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
 
-Every session start also refreshes the code graph, syncs memories, imports the team snapshot and compacts memories, whatever the source. OpenCode's plugin runs session start once per session.
+Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. It then starts `recarto warm` in the background, which brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. The hook does not wait for it. While the worktree's index is unfinished, the block has one line saying so instead of the code map. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
 
 ## Search hints
 
@@ -406,12 +407,13 @@ the lifetime ledger counters:
 - `memories_recalled` climbing while `recall_misses` stays low → recall is hitting.
 - `recall_tokens_injected` → how much context is injected at session start.
 - `reads` / `repeated_reads_blocked` → the just-in-time bug/read surfacing is firing.
+- `graph_index_runs` → how often a worktree was indexed; a session start in an unchanged worktree adds none.
 - `live tokens N / 250000` → how full the live-set budget is (compaction prunes as it
   approaches the cap).
 
 **Is it fast?** Recarto has no built-in timing, so measure the two heavy operations —
 the graph index and recall — directly. Hooks are exit-0 CLI calls, so their latency is
-essentially these two (session-start / post-edit reconcile + session-start injection):
+essentially these two (post-edit reconcile + session-start injection; session start indexes in the background):
 
 **Linux / macOS**
 
@@ -435,7 +437,9 @@ Measure-Command { recarto recall "auth flow" }
 - **SQLite is the single source of truth** (pure-Go `modernc.org/sqlite`, WAL);
   markdown is on-demand export only.
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
-  lazily at session start and incrementally on each edit.
+  in a background process that session start starts (`recarto warm`), on a graph
+  query, and incrementally on each edit. One process at a time indexes a worktree;
+  another that needs it waits.
 - **Hooks start fast.** A hook decodes its payload first and opens only what that
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the

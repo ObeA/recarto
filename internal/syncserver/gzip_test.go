@@ -65,7 +65,7 @@ func TestGzipRequestBodyRejectsOversizedDecompressedBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }() // closing a read body loses nothing
 
 	_, err = io.ReadAll(body)
 	if !errors.Is(err, errDecompressedTooLarge) {

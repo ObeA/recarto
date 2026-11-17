@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // fakeGit + newTestApp duplicated per test package (no shared testutil yet).
@@ -79,4 +81,13 @@ func openTestApp(t *testing.T, branch string) *app.App {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 	return a
+}
+
+// finishIndex indexes root as a's worktree to completion. Session start no
+// longer indexes, so a test that needs the code map or graph hits does.
+func finishIndex(t *testing.T, a *app.App, root string) {
+	t.Helper()
+	if err := a.Graph.ReconcileIfStale(context.Background(), a.Git.Worktree, graph.FSSource{Root: root}, "test-token"); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -16,13 +16,17 @@ func TestPostEditIndexesFile(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Edited(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Edited(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	payload := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
 	if err := PostEdit(context.Background(), a, strings.NewReader(payload), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	var n int
-	a.Store.DB.QueryRow(`SELECT COUNT(*) FROM nodes WHERE name='Edited'`).Scan(&n)
+	if err := a.Store.DB.QueryRow(`SELECT COUNT(*) FROM nodes WHERE name='Edited'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if n != 1 {
 		t.Errorf("Edited node count = %d, want 1 (file not indexed)", n)
 	}
@@ -32,9 +36,13 @@ func TestAugmentInjectsSearchContext(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pe := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
-	PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{})
+	if err := PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
 	aug := `{"session_id":"s1","tool_input":{"pattern":"Authenticate"}}`
@@ -55,9 +63,13 @@ func TestAugmentSkipsFileGlobNoise(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc cs(){}\nfunc Processor(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc cs(){}\nfunc Processor(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pe := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
-	PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{})
+	if err := PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 
 	var globOut bytes.Buffer
 	glob := `{"session_id":"s1","tool_input":{"pattern":"*.cs"}}`
@@ -83,7 +95,9 @@ func TestPostEditSurfacesBugForEditedFile(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc F(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc F(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "edge case in F", Body: "edge case in F — fix: clamp",
@@ -106,9 +120,13 @@ func TestAugmentSurfacesBugsOfNamedSymbol(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
-	PostEdit(ctx, a, strings.NewReader(`{"session_id":"s1","tool_input":{"file_path":"`+filepath.Join(wt, "a.go")+`"}}`), &bytes.Buffer{})
+	if err := PostEdit(ctx, a, strings.NewReader(`{"session_id":"s1","tool_input":{"file_path":"`+filepath.Join(wt, "a.go")+`"}}`), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Authenticate bypass", Body: "Authenticate bypass when token empty — fix: reject",
 		Refs:   []memory.Ref{{Type: memory.RefSymbol, Value: "Authenticate"}},

@@ -11,20 +11,33 @@ import (
 // the table SQLite drives the join from.
 func explainFirstStep(t *testing.T, db *sql.DB, query string, args ...any) string {
 	t.Helper()
+	return explainPlan(t, db, query, args...)[0]
+}
+
+// explainPlan returns the detail of every step of query's plan.
+func explainPlan(t *testing.T, db *sql.DB, query string, args ...any) []string {
+	t.Helper()
 	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
 	defer rows.Close()
-	if !rows.Next() {
-		t.Fatal("empty query plan")
+	var steps []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		steps = append(steps, detail)
 	}
-	var id, parent, notused int
-	var detail string
-	if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return detail
+	if len(steps) == 0 {
+		t.Fatal("empty query plan")
+	}
+	return steps
 }
 
 // TestCallNeighborsPlanDrivesFromConstrainedTable pins the join order of the

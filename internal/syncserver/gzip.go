@@ -113,7 +113,9 @@ func withGzipResponse(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Add("Vary", "Accept-Encoding")
 		gw := gzip.NewWriter(w)
-		defer gw.Close()
+		// The response is already under way: a failed close leaves the client a
+		// truncated body, which its gzip reader reports, and there is no one else to tell.
+		defer func() { _ = gw.Close() }()
 		next(&gzipResponseWriter{ResponseWriter: w, gw: gw}, r)
 	}
 }

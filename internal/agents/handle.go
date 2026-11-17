@@ -42,24 +42,17 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	return Result{}, nil
 }
 
-// sessionStartIndexBudget bounds the synchronous graph warm-up inside the
-// session-start hook. Most repos index (or no-op) well inside it; a huge first
-// index makes bounded progress each session instead of blocking the host. A
-// var so tests can shrink it.
-var sessionStartIndexBudget = 15 * time.Second
-
 // syncPullBudget / syncPushBudget bound the best-effort HTTP memory-sync pull
 // (session-start, before recall) and push (Stop). Sync payloads are small
-// text-only memory rows (never the code graph), so these are much shorter
-// than the graph warm-up budget; a wedged or unreachable sync server must
-// never delay the agent. Vars so tests can shrink them.
+// text-only memory rows (never the code graph), so these are short; a wedged
+// or unreachable sync server must never delay the agent. Vars so tests can
+// shrink them.
 var syncPullBudget = 5 * time.Second
 var syncPushBudget = 5 * time.Second
 
 // boundedSync runs fn (a Syncer.Pull or Syncer.Push call) with a hard
-// deadline, exactly like the graph warm-up goroutine below: abandoning a slow
-// or unreachable server is safe because sync is best-effort and additive —
-// nothing local depends on it completing.
+// deadline: abandoning a slow or unreachable server is safe because sync is
+// best-effort and additive — nothing local depends on it completing.
 func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Context) error) {
 	sctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -79,10 +72,6 @@ func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Cont
 // one kills the process with exit 2, which Claude Code reads as "block". Like
 // any other best-effort failure, it just ends that goroutine's work.
 func recoverHook() { _ = recover() }
-
-// newGraphSource builds the file source for the session-start warm-up; a var so
-// tests can substitute a controllable source.
-var newGraphSource = graph.NewSource
 
 // agentOrDefault stamps an unknown/empty agent as the legacy Claude Code value so
 // the sessions.agent column always carries a host name.
@@ -156,9 +145,9 @@ func conversation(ev Event) string {
 	return "session:" + ev.SessionID + "/agent:" + ev.AgentID
 }
 
-// handleSessionStart opens/creates the session row, warms the code graph, runs
-// gated compaction, recalls a token-budgeted slice for this branch, and returns it
-// as injectable context plus a record nudge. A resume of a conversation that
+// handleSessionStart opens/creates the session row, runs gated compaction,
+// recalls a token-budgeted slice for this branch, and returns it as injectable
+// context plus a record nudge. A resume of a conversation that
 // already got the block returns only the memories it has not been shown yet.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
@@ -248,9 +237,14 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		return resumeContext(ctx, a, scope, results, wsName, wsResults, repoBudget)
 	}
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
+	// A map of an unfinished index leaves modules out without saying so, so
+	// while the index is unfinished the block says that instead.
 	var arch graph.Architecture
+	indexing := false
 	if a.Features.On(features.CodeMap) {
-		arch, _ = a.Graph.Architecture(ctx, a.Git.Worktree, "")
+		if m, done, err := a.Graph.CodeMap(ctx, a.Git.Worktree, a.Git.NonGit); err == nil {
+			arch, indexing = m, !done
+		}
 	}
 	var bugs []*memory.Record
 	if a.Features.On(features.RecentBugs) {
@@ -261,7 +255,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	for _, rc := range a.Repos {
 		extraRepos = append(extraRepos, rc.Git.RepoName)
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, indexing, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
 	// Mark every memory rendered into this block as surfaced for the conversation, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -291,47 +285,9 @@ func applySource(ctx context.Context, a *app.App, scope, source string) (resumed
 	return false, nil
 }
 
-// sessionStartUpkeep warms the code graph, syncs memories, imports the team
-// snapshot and runs gated memory compaction. Every session start runs it,
-// whatever its source.
+// sessionStartUpkeep syncs memories, imports the team snapshot and runs gated
+// memory compaction. Every session start runs it, whatever its source.
 func sessionStartUpkeep(ctx context.Context, a *app.App) {
-	// Warm the code graph for this worktree — best-effort and budget-bounded: a
-	// first index of a large repo would otherwise block the host's hook (and the
-	// user's first message) for minutes. The budget is HARD: the reconcile runs
-	// in a goroutine and is abandoned at the deadline, because parts of it
-	// (git ls-files, filesystem walks, a wedged mount) are not context-aware.
-	// Abandoning is safe — the hook is a one-shot process, committed batches
-	// survive, the crash-safe pending marker records an unfinished resolve, and
-	// a later reconcile (next session, or an MCP query's background refresh)
-	// finishes the job.
-	sctx, cancel := context.WithTimeout(ctx, sessionStartIndexBudget)
-	defer cancel()
-	warmed := make(chan struct{})
-	go func() {
-		defer close(warmed)
-		defer recoverHook()
-		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
-		// Extra served repos (RECARTO_REPOS) reconcile inside the same hard
-		// budget — usually a no-op, since sessions cd'd into those repos keep
-		// their graphs fresh; a cold host makes bounded progress per session.
-		for _, rc := range a.Repos {
-			_ = rc.Graph.ReconcileIfStale(sctx, rc.Git.Worktree, newGraphSource(rc.Git.Worktree), graph.WorktreeToken(rc.Git.Worktree))
-		}
-		// Opportunistic worktree GC, inside the same hard budget: a deleted or
-		// unused worktree keeps its graph copy in the shared store until swept.
-		// The sweep is best-effort, and every committed prune step leaves a state
-		// the next sweep or use recovers from, so abandoning it is safe. A failed
-		// sweep is retried by the next session start, and `recarto compact`
-		// reports its error.
-		if p, err := a.PrunableWorktrees(sctx); err == nil {
-			_, _ = a.PruneWorktrees(sctx, p)
-		}
-	}()
-	select {
-	case <-warmed:
-	case <-sctx.Done():
-	}
-
 	// Pull remote memory changes before recall, so this session's injected
 	// context reflects other machines' work (best-effort, bounded — a wedged or
 	// unreachable sync server must never delay the agent). This runs BEFORE the

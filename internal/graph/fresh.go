@@ -2,10 +2,14 @@ package graph
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // FreshState classifies what a query can expect from the stored graph right now.
@@ -63,10 +67,15 @@ type refreshProgress struct {
 	phase          atomic.Value // string
 }
 
-func (p *refreshProgress) Start(total int) { p.total.Store(int64(total)) }
-func (p *refreshProgress) Inc()            { p.indexed.Add(1) }
-func (p *refreshProgress) Phase(l string)  { p.phase.Store(l) }
-func (p *refreshProgress) Done()           {}
+// Start also clears the phase: a "waiting for another process" label must not
+// outlive the wait, since detail prefers the phase.
+func (p *refreshProgress) Start(total int) {
+	p.total.Store(int64(total))
+	p.phase.Store("")
+}
+func (p *refreshProgress) Inc()           { p.indexed.Add(1) }
+func (p *refreshProgress) Phase(l string) { p.phase.Store(l) }
+func (p *refreshProgress) Done()          {}
 
 func (p *refreshProgress) detail() string {
 	if l, _ := p.phase.Load().(string); l != "" {
@@ -80,7 +89,8 @@ func (p *refreshProgress) detail() string {
 
 // EnsureFresh is the non-blocking, bounded form of query-time freshness. A
 // matching token returns Fresh immediately (three point lookups, microseconds).
-// Otherwise it joins — or starts, at most one per worktree per process — a
+// Otherwise it joins — or starts, at most one per worktree per process; across processes
+// ReconcileIfStale's lock makes a second one wait — a
 // background reconcile DETACHED from ctx, so a caller's timeout or cancellation
 // can never abort indexing mid-flight, waits up to wait for it, and otherwise
 // reports honestly what the caller can serve in the meantime: Refreshing when
@@ -122,13 +132,28 @@ func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, t
 
 // graphFresh reports whether worktree's stored graph already matches token and
 // carries no interrupted-recovery debt (pending resolve marker, missing
-// secondary indexes). Shared by EnsureFresh and ReconcileIfStale. This runs on
-// every graph tool call, so all three checks share one round trip (~65µs on
-// the bench box); see BenchmarkGraphFresh.
+// secondary indexes). Shared by EnsureFresh and ReconcileIfStale.
 func (e *Engine) graphFresh(ctx context.Context, worktree, token string) bool {
 	if token == "" {
 		return false
 	}
+	s, err := readIndexState(ctx, e.st.DB, worktree)
+	return err == nil && s.finished() && s.token == token
+}
+
+// indexState is what the store records about a worktree's index.
+type indexState struct {
+	token     string // stamped by the last finished reconcile; "" when none
+	pending   bool   // a reconcile left committed writes unresolved
+	indexesOK bool   // every graph secondary index exists
+}
+
+// finished reports whether the stored graph is the output of a finished reconcile.
+func (s indexState) finished() bool { return s.token != "" && !s.pending && s.indexesOK }
+
+// readIndexState reads worktree's index state in one round trip on q; graphFresh
+// runs it on every graph tool call (~65µs on the bench box; see BenchmarkGraphFresh).
+func readIndexState(ctx context.Context, q store.Conn, worktree string) (indexState, error) {
 	args := make([]any, 0, len(graphSecondaryIndexes)+2)
 	args = append(args, graphTokenKey+worktree, resolvePendingKey(worktree))
 	ph := make([]string, len(graphSecondaryIndexes))
@@ -136,16 +161,35 @@ func (e *Engine) graphFresh(ctx context.Context, worktree, token string) bool {
 		args = append(args, ix.name)
 		ph[i] = "?"
 	}
-	var stored string
-	var pending bool
+	var s indexState
 	var indexes int
-	err := e.st.DB.QueryRowContext(ctx,
-		`SELECT (SELECT COALESCE(value, '') FROM meta WHERE key=?1),
+	err := q.QueryRowContext(ctx,
+		`SELECT COALESCE((SELECT value FROM meta WHERE key=?1), ''),
 		        EXISTS(SELECT 1 FROM meta WHERE key=?2),
 		        (SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (`+
 			strings.Join(ph, ",")+`))`, args...).
-		Scan(&stored, &pending, &indexes)
-	return err == nil && stored == token && !pending && indexes == len(graphSecondaryIndexes)
+		Scan(&s.token, &s.pending, &indexes)
+	s.indexesOK = indexes == len(graphSecondaryIndexes)
+	return s, err
+}
+
+// codeMapDone reports whether s, read on q, is a finished index the code map
+// may be built from. Outside git no token is ever stamped, so there a graph
+// with files and no recovery debt counts. A finished index of an earlier state
+// of the worktree counts too: it is stale, not partial.
+func codeMapDone(ctx context.Context, q store.Conn, worktree string, nonGit bool, s indexState) (bool, error) {
+	if !nonGit {
+		return s.finished(), nil
+	}
+	if s.pending || !s.indexesOK {
+		return false, nil
+	}
+	var one int
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM files WHERE worktree=? LIMIT 1`, worktree).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // startOrJoinRefresh returns the worktree's in-flight background refresh,

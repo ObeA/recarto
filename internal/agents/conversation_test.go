@@ -127,7 +127,8 @@ func TestResumeAfterStartupAddsNothingUnchanged(t *testing.T) {
 }
 
 func TestResumeAddsOnlyMemoryRecordedSince(t *testing.T) {
-	a, _ := newTreeApp(t)
+	a, dir := newTreeApp(t)
+	finishIndex(t, a, dir)
 	record(t, a, memory.KindLearning, "learning A about caches", "")
 	if got := start(t, a, "s", "startup"); !strings.Contains(got, "Code map") {
 		t.Fatalf("startup block has no code map:\n%s", got)
@@ -199,9 +200,6 @@ func TestResumeStillRunsSessionStartUpkeep(t *testing.T) {
 	}
 	a.Features = off(features.TeamSnapshot, features.AutoCompact)
 	start(t, a, "s", "startup")
-	if err := os.WriteFile(filepath.Join(wt, "w.go"), []byte("package p\nfunc Zeta() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	a.Features = nil
 	start(t, a, "s", "resume")
 	for _, key := range []string{"snapshot_hash", "compact_last_run_at"} {
@@ -209,10 +207,6 @@ func TestResumeStillRunsSessionStartUpkeep(t *testing.T) {
 		if err := a.Store.DB.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, key).Scan(&v); err != nil {
 			t.Errorf("meta %s after resume: %v", key, err)
 		}
-	}
-	hits, err := a.Graph.Search(ctx, wt, "Zeta", "", "", 8)
-	if err != nil || len(hits) == 0 {
-		t.Errorf("Zeta after resume: %v, %v", hits, err)
 	}
 }
 
@@ -233,10 +227,11 @@ func TestSubagentEditsCountForStopNudge(t *testing.T) {
 
 func TestSearchHintSkipsBugShownInRecentBugs(t *testing.T) {
 	a, dir := newTreeApp(t)
-	// On disk: session start reconciles the graph from the tree.
+	// On disk, then indexed: the search hint reads the graph.
 	if err := os.WriteFile(filepath.Join(dir, "h.go"), []byte("package x\n\nfunc handleAugment() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	finishIndex(t, a, dir)
 	const title = "recent-only bug on handleAugment"
 	recordBug(t, a, title, "guard", memory.Ref{Type: memory.RefSymbol, Value: "handleAugment"})
 	a.Features = off(features.SessionMemories)

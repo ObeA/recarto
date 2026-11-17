@@ -8,14 +8,24 @@ import (
 	"syscall"
 )
 
-// tryLockFile takes an exclusive lock on f without waiting, reporting false
-// when another open file holds it. Closing f or exiting releases it. flock
-// binds to the open file description, so two opens in one process exclude
-// each other, which POSIX fcntl locks would not.
-func tryLockFile(f *os.File) (bool, error) {
-	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) {
-		return false, nil
+// lockFile takes an exclusive lock on f, waiting for it when wait is set and
+// otherwise reporting false when another open file holds it. Closing f or
+// exiting releases it. flock binds to the open file description, so two opens
+// in one process exclude each other, which POSIX fcntl locks would not.
+func lockFile(f *os.File, wait bool) (bool, error) {
+	how := syscall.LOCK_EX
+	if !wait {
+		how |= syscall.LOCK_NB
 	}
-	return err == nil, err
+	for {
+		err := syscall.Flock(int(f.Fd()), how)
+		// A signal can cut a wait short.
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return false, nil
+		}
+		return err == nil, err
+	}
 }

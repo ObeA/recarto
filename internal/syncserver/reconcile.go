@@ -49,7 +49,8 @@ func reconcileSyncIndex(ctx context.Context, st *store.Store) (int, error) {
 			if err != nil {
 				return nil, err
 			}
-			defer rows.Close()
+			// A read cursor: closing only frees it, and rows.Err reports read failures.
+			defer func() { _ = rows.Close() }()
 			var out []entry
 			for rows.Next() {
 				var e entry
