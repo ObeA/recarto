@@ -69,8 +69,8 @@ func feedbackList(ctx context.Context, b *feedback.Bundle, w io.Writer, args []s
 		return recs[i].UpdatedAt > recs[j].UpdatedAt
 	})
 	if len(recs) == 0 {
-		fmt.Fprintln(w, "(no feedback)")
-		return nil
+		_, err := fmt.Fprintln(w, "(no feedback)")
+		return err
 	}
 	for _, r := range recs {
 		sig, _ := r.Extra["signal_type"].(string)

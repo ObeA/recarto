@@ -50,22 +50,23 @@ func TestEnsureMCPServerPreservesUnrelatedKeys(t *testing.T) {
 	}
 }
 
-func TestIsOwnedCommand(t *testing.T) {
-	for _, c := range []string{
-		"recarto hook session-start --agent claude",
-		"/usr/local/bin/recarto hook post-edit --agent claude",
+func TestIsOwned(t *testing.T) {
+	const winBin = `C:\Program Files\recarto\recarto.exe`
+	for _, c := range []struct {
+		command string
+		args    []string
+		want    bool
+	}{
+		{"recarto hook session-start --agent claude", nil, true},
+		{"/usr/local/bin/recarto hook post-edit --agent claude", nil, true},
+		{winBin, []string{"hook", "stop", "--agent", "claude"}, true},
+		{"keep-me", nil, false},
+		{"other-tool --flag", nil, false},
+		{"recarto hook stop --agent copilot", nil, false}, // another agent's hook is not ours
+		{winBin, []string{"hook", "stop", "--agent", "copilot"}, false},
 	} {
-		if !isOwnedCommand(c) {
-			t.Errorf("isOwnedCommand(%q) = false, want true", c)
-		}
-	}
-	for _, c := range []string{
-		"keep-me",
-		"other-tool --flag",
-		"recarto hook stop --agent copilot", // another agent's hook is not ours
-	} {
-		if isOwnedCommand(c) {
-			t.Errorf("isOwnedCommand(%q) = true, want false", c)
+		if got := isOwned(c.command, c.args); got != c.want {
+			t.Errorf("isOwned(%q, %q) = %v, want %v", c.command, c.args, got, c.want)
 		}
 	}
 }

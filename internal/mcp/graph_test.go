@@ -637,8 +637,12 @@ func TestFindReferencesHandler(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Target() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(wt, "b.go"), []byte("package p\nfunc Caller() { Target() }\n"), 0o644)
-	os.WriteFile(filepath.Join(wt, "README.md"), []byte("Target is documented here.\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "b.go"), []byte("package p\nfunc Caller() { Target() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "README.md"), []byte("Target is documented here.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +674,9 @@ func TestGetCodeSnippetBatch(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Alpha() {}\nfunc Beta() {}\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Alpha() {}\nfunc Beta() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
 		t.Fatal(err)
 	}
