@@ -26,8 +26,8 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	// ignore-case, glob, …) must be reachable from the CLI itself. `graph help`
 	// or `graph <sub> --help` prints the usage block and exits before any work.
 	if isHelpToken(sub) || containsHelpToken(rest) {
-		fmt.Fprint(w, graphUsage)
-		return nil
+		_, err := fmt.Fprint(w, graphUsage)
+		return err
 	}
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).

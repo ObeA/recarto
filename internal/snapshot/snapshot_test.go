@@ -18,7 +18,11 @@ func newEngine(t *testing.T) *memory.Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return memory.New(st, ledger.New(st), clock.Real{})
 }
 
@@ -59,9 +63,13 @@ func TestExportThenImportRoundTrip(t *testing.T) {
 func TestImportIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	src := newEngine(t)
-	src.Record(ctx, memory.NewMemory{Kind: memory.KindDecision, Title: "D", Body: "chose stdlib flag over cobra"})
+	if _, _, _, err := src.Record(ctx, memory.NewMemory{Kind: memory.KindDecision, Title: "D", Body: "chose stdlib flag over cobra"}); err != nil {
+		t.Fatal(err)
+	}
 	var buf bytes.Buffer
-	Export(ctx, src, &buf)
+	if _, err := Export(ctx, src, &buf); err != nil {
+		t.Fatal(err)
+	}
 	data := buf.Bytes()
 
 	dst := newEngine(t)

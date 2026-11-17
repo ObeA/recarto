@@ -287,7 +287,10 @@ func (c *lspClient) read(r *bufio.Reader) {
 				break
 			}
 			if v, ok := strings.CutPrefix(line, "Content-Length: "); ok {
-				fmt.Sscanf(v, "%d", &length)
+				if _, err := fmt.Sscanf(v, "%d", &length); err != nil {
+					c.failAll(fmt.Errorf("bad Content-Length %q: %w", v, err))
+					return
+				}
 			}
 		}
 		if length < 0 {
@@ -366,7 +369,9 @@ func (c *lspClient) send(msg map[string]any) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n%s", len(raw), raw)
+	if _, err := fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n%s", len(raw), raw); err != nil {
+		c.t.Fatal(err)
+	}
 }
 
 func (c *lspClient) notify(method string, params any) {
@@ -385,8 +390,11 @@ func (c *lspClient) call(method string, params, out any, timeout time.Duration) 
 		return err
 	}
 	c.mu.Lock()
-	fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n%s", len(raw), raw)
+	_, err = fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n%s", len(raw), raw)
 	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	select {
 	case resp := <-ch:
 		if resp.Err != nil {

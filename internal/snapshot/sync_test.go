@@ -18,13 +18,21 @@ func TestSyncImportsOnceThenSkipsUntilChanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	eng := memory.New(st, ledger.New(st), clock.Real{})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".recarto", "memory.jsonl")
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	os.WriteFile(path, []byte(`{"id":"x","kind":"learning","title":"T","body":"shared knowledge","confidence":1,"created_at":1}`+"\n"), 0o644)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"id":"x","kind":"learning","title":"T","body":"shared knowledge","confidence":1,"created_at":1}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	ins, err := SyncOnSessionStart(ctx, eng, st, dir)
 	if err != nil {
@@ -68,7 +76,11 @@ func TestSyncOnSessionStartDoesNotResurrectForgottenMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	eng := memory.New(st, ledger.New(st), clock.Real{})
 
 	id, _, _, err := eng.Record(ctx, memory.NewMemory{
@@ -83,10 +95,14 @@ func TestSyncOnSessionStartDoesNotResurrectForgottenMemory(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".recarto", "memory.jsonl")
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	os.WriteFile(path, []byte(
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(
 		`{"id":"`+id+`","kind":"learning","title":"T","body":"shared knowledge that gets forgotten","confidence":1,"created_at":1}`+"\n",
-	), 0o644)
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	ins, err := SyncOnSessionStart(ctx, eng, st, dir)
 	if err != nil {
@@ -106,7 +122,11 @@ func TestSyncNoFileIsNoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	eng := memory.New(st, ledger.New(st), clock.Real{})
 	ins, err := SyncOnSessionStart(ctx, eng, st, t.TempDir())
 	if err != nil {
