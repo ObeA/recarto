@@ -11,13 +11,22 @@ import (
 	"github.com/gerwim/recarto/internal/licenses"
 )
 
-// known reports whether cmd is a CLI command that needs an open App.
-func known(cmd string) bool {
-	switch cmd {
-	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "index", "graph", "compact", "snapshot", "todo", "sync", "warm":
-		return true
-	}
-	return false
+// appCommands are the CLI commands that run on an open App, by name.
+var appCommands = map[string]func(ctx context.Context, a *app.App, out io.Writer, rest []string) error{
+	"status":   func(ctx context.Context, a *app.App, out io.Writer, _ []string) error { return Status(ctx, a, out) },
+	"doctor":   Doctor,
+	"remember": Remember,
+	"forget":   Forget,
+	"recall":   Recall,
+	"bug":      Bug,
+	"memory":   Memory,
+	"index":    Index,
+	"graph":    Graph,
+	"compact":  Compact,
+	"snapshot": Snapshot,
+	"todo":     Todo,
+	"sync":     Sync,
+	"warm":     func(ctx context.Context, a *app.App, _ io.Writer, _ []string) error { return Warm(ctx, a) },
 }
 
 // Run dispatches a CLI invocation (args excludes the program name) and writes
@@ -100,7 +109,8 @@ func Run(args []string, out io.Writer) (rerr error) {
 		return Serve(context.Background(), app.Config{QuickCheck: true})
 	}
 
-	if !known(cmd) {
+	run, ok := appCommands[cmd]
+	if !ok {
 		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync warm server export import repair)", cmd)
 	}
 
@@ -110,38 +120,7 @@ func Run(args []string, out io.Writer) (rerr error) {
 	}
 	defer func() { rerr = errors.Join(rerr, a.Close()) }()
 
-	ctx := context.Background()
-	switch cmd {
-	case "status":
-		return Status(ctx, a, out)
-	case "doctor":
-		return Doctor(ctx, a, out, rest)
-	case "remember":
-		return Remember(ctx, a, out, rest)
-	case "forget":
-		return Forget(ctx, a, out, rest)
-	case "recall":
-		return Recall(ctx, a, out, rest)
-	case "bug":
-		return Bug(ctx, a, out, rest)
-	case "memory":
-		return Memory(ctx, a, out, rest)
-	case "index":
-		return Index(ctx, a, out, rest)
-	case "graph":
-		return Graph(ctx, a, out, rest)
-	case "compact":
-		return Compact(ctx, a, out, rest)
-	case "snapshot":
-		return Snapshot(ctx, a, out, rest)
-	case "todo":
-		return Todo(ctx, a, out, rest)
-	case "sync":
-		return Sync(ctx, a, out, rest)
-	case "warm":
-		return Warm(ctx, a)
-	}
-	return nil // unreachable: known() gates the switch
+	return run(context.Background(), a, out, rest)
 }
 
 // binaryPath returns the absolute path of the running recarto binary (so hooks
