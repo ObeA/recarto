@@ -14,7 +14,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "index", "graph", "compact", "snapshot", "todo", "sync":
+	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "index", "graph", "compact", "snapshot", "todo", "sync":
 		return true
 	}
 	return false
@@ -91,17 +91,20 @@ func Run(args []string, out io.Writer) (rerr error) {
 		return nil // hooks never block
 	}
 
+	// Only the long-lived serving process pays for the proactive corruption check
+	// (rate-limited to once a day by the store's stamp file): it opens once and
+	// serves for hours, so it must not discover damage on its first write. Hooks
+	// and one-shot commands stay as cheap as before. It answers the MCP handshake
+	// before it opens its stores, so it opens the App itself.
+	if cmd == "serve" {
+		return Serve(context.Background(), app.Config{QuickCheck: true})
+	}
+
 	if !known(cmd) {
 		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
 	}
 
-	// Only the long-lived serving process pays for the proactive corruption check
-	// (rate-limited to once a day by the store's stamp file): it opens once and
-	// serves for hours, so it must not discover damage on its first write. Hooks
-	// and one-shot commands stay as cheap as before.
-	cfg := app.Config{QuickCheck: cmd == "serve"}
-
-	a, err := app.Open(cfg)
+	a, err := app.Open(app.Config{})
 	if err != nil {
 		return err
 	}
@@ -112,7 +115,7 @@ func Run(args []string, out io.Writer) (rerr error) {
 	case "status":
 		return Status(ctx, a, out)
 	case "doctor":
-		return Doctor(ctx, a, out)
+		return Doctor(ctx, a, out, rest)
 	case "remember":
 		return Remember(ctx, a, out, rest)
 	case "forget":
@@ -123,8 +126,6 @@ func Run(args []string, out io.Writer) (rerr error) {
 		return Bug(ctx, a, out, rest)
 	case "memory":
 		return Memory(ctx, a, out, rest)
-	case "serve":
-		return Serve(ctx, a)
 	case "index":
 		return Index(ctx, a, out, rest)
 	case "graph":
@@ -158,7 +159,7 @@ func usage(w io.Writer) error {
   serve             run the MCP server over stdio
   hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]
   status            repo id, branch, memory counts, ledger
-  doctor            health checks (db, WAL, integrity, git)
+  doctor            health checks (db, WAL, integrity, git) (--quick: faster integrity check)
   repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
   remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
   forget <id>       hard-delete a memory by id

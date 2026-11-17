@@ -210,7 +210,7 @@ hooks fire automatically. The CLI is available for inspection and scripting:
 recarto config            turn features on or off (interactive; or list|enable|disable|path)
 recarto licenses          print Recarto's licence and the third-party notices
 recarto status            repo id, branch, memory counts, ledger
-recarto doctor            health checks (db, WAL, integrity, git)
+recarto doctor            health checks (db, WAL, integrity, git) (--quick: faster integrity check)
 recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
 recarto forget <id>       hard-delete a memory by id
 recarto recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)
@@ -396,7 +396,9 @@ recarto index             # build the code graph for this worktree
 ```
 
 `recarto doctor` checks the store (WAL, integrity, schema) and git identity, and exits
-non-zero if any check fails — so it doubles as a smoke test in scripts and CI.
+non-zero if any check fails — so it doubles as a smoke test in scripts and CI. The full
+integrity check can take minutes on a large store; `recarto doctor --quick` runs the
+faster quick check instead.
 
 **Is it doing useful work?** Run `recarto status` after a few agent sessions and watch
 the lifetime ledger counters:
@@ -452,11 +454,14 @@ Recarto repairs itself:
 
 - **On open.** A store that fails to open is rebuilt automatically, and the session
   continues.
-- **At `recarto serve` startup.** A `PRAGMA quick_check` runs at most once per
-  `RECARTO_QUICKCHECK_INTERVAL` (default `24h`; `0` disables it), so a store that
-  opens and reads fine but is damaged underneath is caught *before* the session's
-  first write rather than by it. Hooks and one-shot CLI commands skip this and stay
-  as fast as before.
+- **At `recarto serve` startup.** Once the server has answered the client, a
+  `PRAGMA quick_check` runs, at most once per `RECARTO_QUICKCHECK_INTERVAL` (default
+  `24h`; `0` disables it). A store that opens and reads fine but is damaged
+  underneath is then repaired *before* the session's first write. That server's tool
+  calls wait for the check or repair, and after 10 s fail with a message to try
+  again. One process checks a store at a time. A check cut short (the session closed
+  or was killed) is not retried for an hour. Hooks and one-shot CLI commands skip
+  the check.
 - **On demand.** `recarto repair` rebuilds this repo's store; `recarto repair --path
   <store.db>` targets any other one (the workspace or feedback store, another repo's
   cache). It has no corruption precondition, so it doubles as "rebuild my store,

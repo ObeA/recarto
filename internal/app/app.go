@@ -33,9 +33,11 @@ type Config struct {
 	// QuickCheck enables the store's proactive corruption check at open time
 	// (store.WithQuickCheck) for every store this App opens: the primary repo,
 	// the RECARTO_REPOS extras and the workspace store. Only long-lived serving
-	// processes set it — `recarto serve` — so a session starts on a store that
-	// has been proven readable rather than discovering damage on its first write.
-	// One-shot commands and hooks leave it off and stay as cheap as before.
+	// processes set it — `recarto serve`, which runs the open after it has
+	// answered the MCP handshake (see mcp.Serve) — so a session's tool calls use
+	// a store that has been proven readable rather than discovering damage on
+	// their first write. One-shot commands and hooks leave it off and stay as
+	// cheap as before.
 	QuickCheck bool
 	// SkipWorkspace leaves App.Workspace nil, so its store is never opened —
 	// for the per-tool hooks (post-read, post-edit, augment), which never touch
@@ -111,7 +113,12 @@ func (a *App) SignalSync() {
 // also runs migrations), builds the engine + ledger, and upserts repo metadata.
 // The git identity is resolved exactly once here and cached on App, so a
 // long-lived `serve` process resolves git a single time (spec §6).
-func Open(cfg Config) (*App, error) {
+func Open(cfg Config) (*App, error) { return OpenContext(context.Background(), cfg) }
+
+// OpenContext is Open bounded by ctx. ctx bounds the proactive check
+// (cfg.QuickCheck): cancelling it interrupts a running check, and the open
+// fails with that error.
+func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 	runner, gc, err := resolvePrimary(cfg)
 	if err != nil {
 		return nil, err
@@ -124,7 +131,7 @@ func Open(cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	storeOpts := storeOptions(cfg)
+	storeOpts := storeOptions(ctx, cfg)
 	st, err := store.Open(path, storeOpts...)
 	if err != nil {
 		return nil, err
@@ -152,7 +159,7 @@ func Open(cfg Config) (*App, error) {
 		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
 		Features: features.Load(),
 	}
-	if err := a.writeMeta(context.Background()); err != nil {
+	if err := a.writeMeta(ctx); err != nil {
 		_ = a.Close()
 		return nil, err
 	}
@@ -200,6 +207,36 @@ func Worktrees(cfg Config) ([]string, error) {
 	return out, nil
 }
 
+// Served is what decides which MCP tools and tool fields an App offers.
+type Served struct {
+	Features features.Set
+	// Workspace means a cross-repo workspace store is served.
+	Workspace bool
+	// Repos means RECARTO_REPOS adds at least one repo besides the primary.
+	Repos bool
+}
+
+// Served returns what a offers.
+func (a *App) Served() Served {
+	return Served{Features: a.Features, Workspace: a.Workspace != nil, Repos: len(a.Repos) > 0}
+}
+
+// Describe returns what an App opened with cfg would offer. It resolves
+// identity as Open does but opens no store, so `recarto serve` can list its
+// tools before its stores open. It differs from the opened App only when an
+// extra repo's store then fails to open.
+func Describe(cfg Config) (Served, error) {
+	_, gc, err := resolvePrimary(cfg)
+	if err != nil {
+		return Served{}, err
+	}
+	return Served{
+		Features:  features.Load(),
+		Workspace: !cfg.SkipWorkspace && workspace.Name() != "",
+		Repos:     len(extraRepos(gc.RepoID)) > 0,
+	}, nil
+}
+
 // resolveReal resolves dir's identity with real git, through the cross-process
 // identity cache, so a hook skips the git spawns while the checkout is
 // unchanged. An injected test Runner bypasses it (Open calls Resolve).
@@ -210,9 +247,9 @@ func resolveReal(dir string) (gitctx.Context, error) {
 
 // storeOptions maps the App config onto the store-level options every store
 // this process opens should share.
-func storeOptions(cfg Config) []store.Option {
+func storeOptions(ctx context.Context, cfg Config) []store.Option {
 	if cfg.QuickCheck {
-		return []store.Option{store.WithQuickCheck()}
+		return []store.Option{store.WithQuickCheck(ctx)}
 	}
 	return nil
 }
@@ -296,14 +333,14 @@ func (a *App) SyncAll(ctx context.Context) {
 	}
 }
 
-// openRepos resolves RECARTO_REPOS (a filepath.SplitList of repo roots) into
-// served repo contexts. Best-effort by design: a path that is missing (an
-// unmounted host's config), not a git repo, unresolvable, or a duplicate of
-// the primary or an earlier entry is skipped — an incomplete list must never
-// fail the session.
-func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*RepoContext {
+// extraRepos resolves RECARTO_REPOS (a filepath.SplitList of repo roots) into
+// the identities of the extra repos to serve. Best-effort by design: a path
+// that is missing (an unmounted host's config), not a git repo, unresolvable,
+// or a duplicate of the primary or an earlier entry is skipped — an incomplete
+// list must never fail the session.
+func extraRepos(primaryID string) []gitctx.Context {
 	seen := map[string]bool{primaryID: true}
-	var out []*RepoContext
+	var out []gitctx.Context
 	for _, p := range filepath.SplitList(os.Getenv("RECARTO_REPOS")) {
 		if p == "" {
 			continue
@@ -312,6 +349,17 @@ func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*
 		if err != nil || gc.NonGit || seen[gc.RepoID] {
 			continue
 		}
+		seen[gc.RepoID] = true
+		out = append(out, gc)
+	}
+	return out
+}
+
+// openRepos opens the extra repos' stores (extraRepos) into served repo
+// contexts, skipping a repo whose store fails to open.
+func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*RepoContext {
+	var out []*RepoContext
+	for _, gc := range extraRepos(primaryID) {
 		path, err := cache.StorePath(gc.RepoID)
 		if err != nil {
 			continue
@@ -329,7 +377,6 @@ func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*
 		}
 		eng.SetRefResolver(graphRefResolver{st: st})
 		syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
-		seen[gc.RepoID] = true
 		out = append(out, &RepoContext{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Sync: syncer})
 	}
 	return out

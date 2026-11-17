@@ -2,10 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gerwim/recarto/internal/cache"
 	"github.com/gerwim/recarto/internal/clock"
 	"github.com/gerwim/recarto/internal/memory"
 )
@@ -87,5 +91,43 @@ func TestOpenBuildsGraphEngine(t *testing.T) {
 	a := newTestApp(t, "main")
 	if a.Graph == nil {
 		t.Fatal("App.Graph is nil")
+	}
+}
+
+func TestOpenContextInterruptsTheQuickCheck(t *testing.T) {
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	t.Setenv("RECARTO_WORKSPACE", "")
+	cfg := Config{
+		CWD:        "/repo",
+		Runner:     fakeGit{branch: "main"},
+		Clock:      clock.NewFake(time.UnixMilli(1_700_000_000_000)),
+		QuickCheck: true,
+	}
+	_, gc, err := resolvePrimary(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := cache.StorePath(gc.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a, err := OpenContext(ctx, cfg)
+	if err == nil {
+		t.Fatalf("OpenContext with a cancelled ctx succeeded (close: %v)", a.Close())
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenContext with a cancelled ctx = %v, want context.Canceled", err)
+	}
+	// store.quickCheckStamp and store.quickCheckLock name these files; this
+	// package cannot reach them.
+	if _, err := os.Stat(path + ".quickcheck"); !os.IsNotExist(err) {
+		t.Errorf("stamp after an interrupted check: %v, want none", err)
+	}
+	want := fmt.Sprintf("pid=%d at=", os.Getpid())
+	if b, err := os.ReadFile(path + ".quickcheck.lock"); err != nil || !strings.HasPrefix(string(b), want) {
+		t.Errorf("lock file after an interrupted check = %q (%v), want a trace starting %q", b, err, want)
 	}
 }

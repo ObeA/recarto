@@ -127,7 +127,7 @@ func TestTodosOffRejectsTodoMemories(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	hasTodo := func() bool {
-		for _, v := range recordMemorySchema(a).Properties["kind"].Enum {
+		for _, v := range recordMemorySchema(a.Served()).Properties["kind"].Enum {
 			if v == "todo" {
 				return true
 			}

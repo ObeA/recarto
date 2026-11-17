@@ -116,7 +116,8 @@ func (c *Client) Pull(ctx context.Context, repoKey string, since int64, limit in
 	if err != nil {
 		return syncwire.ChangesResponse{}, err
 	}
-	defer resp.Body.Close()
+	// The decode reports any read failure; closing cannot change the answer.
+	defer func() { _ = resp.Body.Close() }()
 	var out syncwire.ChangesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return syncwire.ChangesResponse{}, err
@@ -147,7 +148,8 @@ func (c *Client) Push(ctx context.Context, repoKey string, records []syncwire.Re
 	if err != nil {
 		return syncwire.PushResponse{}, err
 	}
-	defer resp.Body.Close()
+	// The decode reports any read failure; closing cannot change the answer.
+	defer func() { _ = resp.Body.Close() }()
 	var out syncwire.PushResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return syncwire.PushResponse{}, err
