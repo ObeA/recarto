@@ -14,7 +14,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "index", "graph", "compact", "snapshot", "todo", "sync":
+	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "index", "graph", "compact", "snapshot", "todo", "sync", "warm":
 		return true
 	}
 	return false
@@ -101,7 +101,7 @@ func Run(args []string, out io.Writer) (rerr error) {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
+		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync warm server export import repair)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -138,6 +138,8 @@ func Run(args []string, out io.Writer) (rerr error) {
 		return Todo(ctx, a, out, rest)
 	case "sync":
 		return Sync(ctx, a, out, rest)
+	case "warm":
+		return Warm(ctx, a)
 	}
 	return nil // unreachable: known() gates the switch
 }
@@ -173,6 +175,7 @@ func usage(w io.Writer) error {
   snapshot          export|import the committable team memory (.recarto/memory.jsonl)
   todo list|done    list open todos, or mark one done
   update            self-update to the latest (or a chosen) release (--version --list --check --yes)
+  warm              index this worktree and the served repos, then drop the graph of dead and unused worktrees (session start runs it in the background)
   sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop
   server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)
   export            export every project's full memory history to an archive (--out --repo --push --url --key)

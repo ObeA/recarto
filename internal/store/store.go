@@ -389,6 +389,21 @@ func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
 	return s.writeTx(ctx, fn, false)
 }
 
+// ReadTx runs fn in one read transaction: every read in fn sees the same state
+// of the store while other connections and processes write.
+func (s *Store) ReadTx(ctx context.Context, fn func(c Conn) error) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		// The transaction wrote nothing, so a failed rollback loses nothing.
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 // bulkCacheMBDefault is the WriteTxBulk page-cache size in MiB when
 // RECARTO_BULK_CACHE_MB is unset.
 const bulkCacheMBDefault = 128

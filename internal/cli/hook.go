@@ -39,6 +39,7 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 			_ = a.Close()
 		}
 	}()
+	var warm bool
 	open := func(ev agents.Event) (*app.App, error) {
 		cfg := app.Config{SkipWorkspace: ev.Kind != agents.KindSessionStart && ev.Kind != agents.KindStop}
 		var files []string // the event acts only on these files
@@ -55,10 +56,19 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 		}
 		var err error
 		a, err = app.Open(cfg)
+		warm = err == nil && ev.Kind == agents.KindSessionStart
 		return a, err
 	}
 	if err := hook(ctx, open, in, out, args); err != nil {
 		fmt.Fprintln(os.Stderr, "recarto hook:", err)
+	}
+	// Session start hands the graph work to its own process, so the hook never
+	// waits for an index. It starts after the block is written, so it cannot
+	// race the block's reads of the graph.
+	if warm {
+		if err := startWarm(); err != nil {
+			fmt.Fprintln(os.Stderr, "recarto hook: start the background index:", err)
+		}
 	}
 }
 
