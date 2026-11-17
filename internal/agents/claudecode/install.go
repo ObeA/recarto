@@ -2,20 +2,26 @@ package claudecode
 
 import (
 	"runtime"
+	"strings"
 
 	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/features"
 )
 
 // goos is the target OS Recarto installs for. It indirects runtime.GOOS so tests
-// can exercise the Windows-specific hook shell without running on Windows.
+// can exercise the Windows exec-form hooks without running on Windows.
 var goos = runtime.GOOS
 
-// hookSpec is one (event, matcher, command, shell, if) hook the installer
-// registers. shell is the Claude Code hook `shell` field ("" leaves Claude's
-// default); ifRule its `if` permission-rule filter ("" runs it for every
-// matched tool call).
-type hookSpec struct{ event, matcher, command, shell, ifRule string }
+// hookSpec is one hook the installer registers: its event, matcher, `if`
+// permission-rule filter ("" runs it for every matched tool call), and the
+// handler it runs. On Windows the handler is in exec form: command is the
+// binary and args its arguments. Elsewhere command is the whole command line
+// and args is nil.
+type hookSpec struct {
+	event, matcher, command string
+	args                    []string
+	ifRule                  string
+}
 
 // hookSpecs are the advisory hooks. SessionStart and Stop run unconditionally
 // (no matcher); post-read, post-edit, and augment are scoped to their tools. Each
@@ -26,33 +32,34 @@ type hookSpec struct{ event, matcher, command, shell, ifRule string }
 // runs only when the command line runs that command (its `if`), so any other
 // Bash call starts no Recarto process; --cmd tells the hook which key started
 // it, so a line matching several keys is answered once.
+//
+// On Windows Claude Code runs a shell-form command through Git Bash, which
+// drops the backslashes of an unquoted Windows path, or through PowerShell,
+// whose start costs several times the hook's own run. Exec form (Claude Code
+// 2.1.139+) starts the binary directly, with no shell and no quoting. See
+// docs/validation/2026-11-17-windows-hook-launch.md.
 func hookSpecs(binary string) []hookSpec {
-	shell := hookShell()
+	hook := func(event, matcher, ifRule string, words ...string) hookSpec {
+		args := append([]string{"hook"}, words...)
+		if goos == "windows" {
+			return hookSpec{event: event, matcher: matcher, command: binary, args: args, ifRule: ifRule}
+		}
+		return hookSpec{event: event, matcher: matcher, command: binary + " " + strings.Join(args, " "), ifRule: ifRule}
+	}
 	specs := []hookSpec{
-		{"SessionStart", "", binary + " hook session-start --agent claude", shell, ""},
-		{"PostToolUse", "Read", binary + " hook post-read --agent claude", shell, ""},
-		{"PostToolUse", "Edit|Write", binary + " hook post-edit --agent claude", shell, ""},
-		{"PostToolUse", "Grep|Glob", binary + " hook augment --agent claude", shell, ""},
+		hook("SessionStart", "", "", "session-start", "--agent", "claude"),
+		hook("PostToolUse", "Read", "", "post-read", "--agent", "claude"),
+		hook("PostToolUse", "Edit|Write", "", "post-edit", "--agent", "claude"),
+		hook("PostToolUse", "Grep|Glob", "", "augment", "--agent", "claude"),
 	}
 	for _, c := range agents.ShellCommands {
 		rule := c
 		if c == "git" {
 			rule = "git grep"
 		}
-		specs = append(specs, hookSpec{"PostToolUse", "Bash", binary + " hook shell --agent claude --cmd " + c, shell, "Bash(" + rule + " *)"})
+		specs = append(specs, hook("PostToolUse", "Bash", "Bash("+rule+" *)", "shell", "--agent", "claude", "--cmd", c))
 	}
-	return append(specs, hookSpec{"Stop", "", binary + " hook stop --agent claude", shell, ""})
-}
-
-// hookShell returns the Claude Code hook `shell` to pin. On Windows, Claude
-// launches command hooks via Git Bash when present (else PowerShell), and our
-// `recarto hook …` invocation breaks under that bash, so we pin PowerShell. On
-// other platforms the default shell is correct, so we leave the field unset.
-func hookShell() string {
-	if goos == "windows" {
-		return "powershell"
-	}
-	return ""
+	return append(specs, hook("Stop", "", "", "stop", "--agent", "claude"))
 }
 
 // Install sets up Claude Code integration at the given scope. It is idempotent:

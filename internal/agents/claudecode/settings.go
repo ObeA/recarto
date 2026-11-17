@@ -41,20 +41,45 @@ func ensureMCPServer(doc map[string]any, binary string) bool {
 	return changed
 }
 
-// isOwnedCommand reports whether a settings.json hook command was installed by
-// recarto for the Claude agent. Recarto's hook commands follow the grammar
-// `<binary> hook <event> --agent claude`, so this recognizes them regardless of
-// where the binary lives — letting a re-install prune hooks shipped by an older
-// version (renamed events, moved binary) instead of leaving them to pile up.
-func isOwnedCommand(c string) bool {
-	return strings.Contains(c, " hook ") && strings.Contains(c, "--agent claude")
+// isOwned reports whether a settings.json hook handler was installed by recarto
+// for the Claude agent. Recarto's handlers run `<binary> hook <event> --agent
+// claude`, either as one command line or in exec form (the binary as command,
+// the rest as args). They are recognized in either form wherever the binary
+// lives, letting a re-install prune hooks shipped by an older version (renamed
+// events, moved binary, another form) instead of leaving them to pile up.
+func isOwned(command string, args []string) bool {
+	line := strings.Join(append([]string{command}, args...), " ")
+	return strings.Contains(line, " hook ") && strings.Contains(line, "--agent claude")
 }
 
-// ownedCommands returns the recarto-owned hook commands currently in settings,
-// mapped to their `shell` and `if` fields (hookFields). Tracking them lets a
-// re-install detect installs whose hooks predate the per-OS shell or a changed
-// filter and re-sync them, rather than treating a matching command set alone
-// as up to date.
+// handlerArgs returns a handler's exec-form args, or nil when it has none. A
+// non-string element becomes "": recarto never writes one, so it only has to
+// keep a foreign handler from matching.
+func handlerArgs(hm map[string]any) []string {
+	raw, ok := hm["args"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(raw))
+	for i, a := range raw {
+		out[i], _ = a.(string)
+	}
+	return out
+}
+
+// handlerKey identifies a handler by its command and exec-form args. The key
+// keeps the two forms apart, so a shell-form install is re-synced to exec form
+// even when the words match.
+func handlerKey(command string, args []string) string {
+	return strings.Join(append([]string{command}, args...), "\x00")
+}
+
+// ownedCommands returns the recarto-owned hook handlers currently in settings,
+// keyed by handlerKey and mapped to their `shell` and `if` fields (hookFields).
+// Tracking the form and the shell lets a re-install move hooks an older version
+// wrote (shell form; `"shell": "powershell"` on Windows) or with a changed
+// filter to the current form, rather than treating matching words alone as up
+// to date.
 func ownedCommands(settings map[string]any) map[string]string {
 	out := map[string]string{}
 	hooks, _ := settings["hooks"].(map[string]any)
@@ -65,10 +90,11 @@ func ownedCommands(settings map[string]any) map[string]string {
 			hs, _ := gm["hooks"].([]any)
 			for _, h := range hs {
 				hm, _ := h.(map[string]any)
-				if c, _ := hm["command"].(string); isOwnedCommand(c) {
+				c, _ := hm["command"].(string)
+				if args := handlerArgs(hm); isOwned(c, args) {
 					shell, _ := hm["shell"].(string)
 					ifRule, _ := hm["if"].(string)
-					out[c] = hookFields(shell, ifRule)
+					out[handlerKey(c, args)] = hookFields(shell, ifRule)
 				}
 			}
 		}
@@ -92,7 +118,7 @@ func removeOwnedHooks(settings map[string]any) {
 			keptHooks := make([]any, 0, len(hs))
 			for _, h := range hs {
 				hm, _ := h.(map[string]any)
-				if c, _ := hm["command"].(string); isOwnedCommand(c) {
+				if c, _ := hm["command"].(string); isOwned(c, handlerArgs(hm)) {
 					continue
 				}
 				keptHooks = append(keptHooks, h)
@@ -119,7 +145,8 @@ func syncHooks(settings map[string]any, binary string) string {
 	desired := hookSpecs(binary)
 	want := make(map[string]string, len(desired))
 	for _, hs := range desired {
-		want[hs.command] = hookFields(hs.shell, hs.ifRule)
+		// recarto's handlers set no shell.
+		want[handlerKey(hs.command, hs.args)] = hookFields("", hs.ifRule)
 	}
 	if reflect.DeepEqual(ownedCommands(settings), want) {
 		return "already present"
@@ -178,12 +205,18 @@ func appendHook(settings map[string]any, hs hookSpec) map[string]any {
 	return group
 }
 
-// hookEntry is hs's command hook handler. shell is omitted when empty (Claude
-// uses its default shell for the platform), as is an empty if.
+// hookEntry is hs's command hook handler. It never sets a shell; args is
+// written only in exec form, and if only when non-empty.
 func hookEntry(hs hookSpec) map[string]any {
 	entry := map[string]any{"type": "command", "command": hs.command}
-	if hs.shell != "" {
-		entry["shell"] = hs.shell
+	if hs.args != nil {
+		// []any is what a decoded settings file holds, so handlerArgs reads a
+		// fresh entry and a re-read one alike.
+		args := make([]any, len(hs.args))
+		for i, a := range hs.args {
+			args[i] = a
+		}
+		entry["args"] = args
 	}
 	if hs.ifRule != "" {
 		entry["if"] = hs.ifRule

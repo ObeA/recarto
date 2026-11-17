@@ -188,6 +188,11 @@ The instructions are a short block of rules between `<!-- recarto:begin -->` and
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
 
+On Windows, Claude Code starts Recarto's hooks directly, without a shell: `command` is
+the path to `recarto.exe` and the hook's arguments are in `args`. This needs Claude Code
+2.1.139 or later. Re-run `recarto init` to move hooks that an older Recarto set up to run
+through PowerShell.
+
 The generated OpenCode plugin works with both OpenCode 1.x and OpenCode 2.x (its
 default export carries the 2.x `setup` entrypoint and the 1.x `server` one), so it
 keeps working across an OpenCode upgrade. OpenCode 2 does not load plugins written by

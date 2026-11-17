@@ -1,9 +1,11 @@
 package claudecode
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +14,7 @@ import (
 )
 
 func TestInstallRepoScopeWritesConfigAndIsIdempotent(t *testing.T) {
+	setGOOS(t, "linux")
 	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 	dir := t.TempDir()
 	home := t.TempDir()
@@ -96,6 +99,7 @@ func TestInstallInstructionsFollowConfig(t *testing.T) {
 }
 
 func TestInstallReplacesStaleHooks(t *testing.T) {
+	setGOOS(t, "linux")
 	dir := t.TempDir()
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
@@ -146,83 +150,6 @@ func setGOOS(t *testing.T, v string) {
 	t.Cleanup(func() { goos = old })
 }
 
-func TestHookSpecsPinPowershellOnWindows(t *testing.T) {
-	setGOOS(t, "windows")
-	for _, hs := range hookSpecs("recarto") {
-		if hs.shell != "powershell" {
-			t.Errorf("hook %q shell = %q, want powershell", hs.command, hs.shell)
-		}
-	}
-}
-
-func TestHookSpecsLeaveShellDefaultElsewhere(t *testing.T) {
-	setGOOS(t, "linux")
-	for _, hs := range hookSpecs("recarto") {
-		if hs.shell != "" {
-			t.Errorf("hook %q shell = %q, want empty on linux", hs.command, hs.shell)
-		}
-	}
-}
-
-func TestInstallPinsPowershellShellOnWindows(t *testing.T) {
-	setGOOS(t, "windows")
-	dir := t.TempDir()
-	home := t.TempDir()
-	p := agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: home}
-	if _, err := Install(p, "recarto"); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
-	s := string(b)
-	// Every recarto-owned hook entry must carry the powershell shell so the
-	// command does not get launched under bash/Git Bash on Windows. The on-disk
-	// JSON is indented, so match the spaced form.
-	if n := strings.Count(s, `"shell": "powershell"`); n != len(hookSpecs("recarto")) {
-		t.Errorf("got %d powershell shells, want %d:\n%s", n, len(hookSpecs("recarto")), s)
-	}
-}
-
-func TestInstallNoShellFieldOnNonWindows(t *testing.T) {
-	setGOOS(t, "linux")
-	dir := t.TempDir()
-	home := t.TempDir()
-	p := agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: home}
-	if _, err := Install(p, "recarto"); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
-	if strings.Contains(string(b), `"shell"`) {
-		t.Errorf("non-windows install should not write a shell field:\n%s", b)
-	}
-}
-
-// A Windows user who installed with an older version has the recarto hooks but
-// no shell field (so they break under bash). Re-running init must add the shell
-// rather than report the hooks already present.
-func TestSyncHooksAddsMissingShellOnWindows(t *testing.T) {
-	setGOOS(t, "windows")
-	settings := map[string]any{}
-	// Seed the current commands WITHOUT a shell, as an older installer would.
-	for _, hs := range hookSpecs("recarto") {
-		hs.shell = ""
-		appendHook(settings, hs)
-	}
-	if got := syncHooks(settings, "recarto"); got == "already present" {
-		t.Fatalf("syncHooks reported %q; expected a re-sync to add the shell", got)
-	}
-	b, err := json.Marshal(settings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(string(b), `"shell":"powershell"`); n != len(hookSpecs("recarto")) {
-		t.Errorf("got %d powershell shells after re-sync, want %d:\n%s", n, len(hookSpecs("recarto")), b)
-	}
-	// And it is now idempotent.
-	if got := syncHooks(settings, "recarto"); got != "already present" {
-		t.Errorf("second syncHooks = %q, want already present", got)
-	}
-}
-
 func TestInstallUserScopeTargets(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
@@ -267,6 +194,7 @@ func shellGroups(t *testing.T, path string) []map[string]any {
 // command, each filtered by its `if`, no duplicates on a re-run, and the
 // foreign hook kept.
 func TestInstallAddsPerCommandShellHooks(t *testing.T) {
+	setGOOS(t, "linux")
 	for _, scope := range []agents.Scope{agents.ScopeRepo, agents.ScopeUser} {
 		p := agents.Paths{Scope: scope, Dir: t.TempDir(), Home: t.TempDir()}
 		settingsPath := filepath.Join(p.Dir, ".claude", "settings.json")
@@ -342,5 +270,212 @@ func TestSyncHooksRefreshesChangedIf(t *testing.T) {
 	}
 	if got := syncHooks(settings, "recarto"); got != "already present" {
 		t.Errorf("second syncHooks = %q, want already present", got)
+	}
+}
+
+// Linux and macOS hooks are written exactly as before exec form existed: the
+// golden file was produced by the installer that predates it.
+func TestInstallWritesUnixHooksAsBefore(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("testdata", "settings-unix.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, goosName := range []string{"linux", "darwin"} {
+		setGOOS(t, goosName)
+		dir := t.TempDir()
+		if _, err := Install(agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: t.TempDir()}, "/usr/local/bin/recarto"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s: settings.json differs from testdata/settings-unix.json:\n%s", goosName, got)
+		}
+	}
+}
+
+// winBinary has spaces, which no quoting is needed for in exec form.
+const winBinary = `C:\Users\Jane Doe\AppData\Local\Programs\recarto\recarto.exe`
+
+// windowsHandlers counts the exec-form handlers that run binary, keyed by
+// event, matcher, if and args. It fails the test for a recarto handler that
+// sets a shell or is still in shell form.
+func windowsHandlers(t *testing.T, settingsPath, binary string) map[string]int {
+	t.Helper()
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Hooks map[string][]struct {
+			Matcher string           `json:"matcher"`
+			Hooks   []map[string]any `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]int{}
+	for event, groups := range doc.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				command, _ := h["command"].(string)
+				if command != binary && !isOwned(command, handlerArgs(h)) {
+					continue
+				}
+				if _, ok := h["shell"]; ok {
+					t.Errorf("recarto handler sets a shell: %v", h)
+				}
+				if strings.Contains(command, " hook ") {
+					t.Errorf("recarto handler still in shell form: %v", h)
+					continue
+				}
+				raw, ok := h["args"].([]any)
+				if !ok {
+					t.Errorf("recarto handler has no args array: %v", h)
+					continue
+				}
+				words := make([]string, len(raw))
+				for i, a := range raw {
+					s, ok := a.(string)
+					if !ok {
+						t.Errorf("non-string arg in %v", h)
+					}
+					words[i] = s
+				}
+				ifRule, _ := h["if"].(string)
+				out[event+"\t"+g.Matcher+"\t"+ifRule+"\t"+strings.Join(words, " ")]++
+			}
+		}
+	}
+	return out
+}
+
+// wantWindowsHandlers is every recarto hook once, in exec form.
+func wantWindowsHandlers() map[string]int {
+	want := map[string]int{
+		"SessionStart\t\t\thook session-start --agent claude":      1,
+		"PostToolUse\tRead\t\thook post-read --agent claude":       1,
+		"PostToolUse\tEdit|Write\t\thook post-edit --agent claude": 1,
+		"PostToolUse\tGrep|Glob\t\thook augment --agent claude":    1,
+		"Stop\t\t\thook stop --agent claude":                       1,
+	}
+	for _, c := range agents.ShellCommands {
+		rule := c
+		if c == "git" {
+			rule = "git grep"
+		}
+		want["PostToolUse\tBash\tBash("+rule+" *)\thook shell --agent claude --cmd "+c] = 1
+	}
+	return want
+}
+
+func TestInstallWritesExecFormOnWindows(t *testing.T) {
+	setGOOS(t, "windows")
+	dir := t.TempDir()
+	if _, err := Install(agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: t.TempDir()}, winBinary); err != nil {
+		t.Fatal(err)
+	}
+	got := windowsHandlers(t, filepath.Join(dir, ".claude", "settings.json"), winBinary)
+	if want := wantWindowsHandlers(); !reflect.DeepEqual(got, want) {
+		t.Errorf("handlers = %v\nwant %v", got, want)
+	}
+}
+
+// An install from Recarto 1.7/1.8 (PowerShell pinned) with one hook from
+// before the pin moves to exec form, keeping other tools' hooks.
+func TestInstallMovesPowershellHooksToExecForm(t *testing.T) {
+	setGOOS(t, "windows")
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ps := func(words string, extra string) map[string]any {
+		h := map[string]any{"type": "command", "command": winBinary + " hook " + words + " --agent claude", "shell": "powershell"}
+		if extra != "" {
+			h["if"] = extra
+		}
+		return h
+	}
+	group := func(matcher string, hs ...map[string]any) map[string]any {
+		g := map[string]any{"hooks": hs}
+		if matcher != "" {
+			g["matcher"] = matcher
+		}
+		return g
+	}
+	shellHook := ps("shell", "Bash(grep *)")
+	shellHook["command"] = winBinary + " hook shell --agent claude --cmd grep"
+	seed := map[string]any{"hooks": map[string]any{
+		"PreToolUse":   []any{group("Bash", map[string]any{"type": "command", "command": "keep-me"})},
+		"SessionStart": []any{group("", ps("session-start", ""))},
+		"PostToolUse": []any{
+			group("Read", ps("post-read", ""), map[string]any{"type": "command", "command": "Write-Output read", "shell": "powershell"}),
+			group("Edit|Write", ps("post-edit", "")),
+			group("Grep|Glob", ps("augment", "")),
+			group("Bash", shellHook),
+		},
+		"Stop": []any{group("", map[string]any{"type": "command", "command": winBinary + " hook stop --agent claude"})},
+	}}
+	b, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: t.TempDir()}
+	res, err := Install(p, winBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res.Hooks, "installed") {
+		t.Errorf("Hooks = %q, want installed N", res.Hooks)
+	}
+	if got, want := windowsHandlers(t, settingsPath, winBinary), wantWindowsHandlers(); !reflect.DeepEqual(got, want) {
+		t.Errorf("handlers = %v\nwant %v", got, want)
+	}
+	first, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Hooks map[string][]struct {
+			Hooks []map[string]any `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(first, &doc); err != nil {
+		t.Fatal(err)
+	}
+	foreign := map[string]bool{}
+	for _, groups := range doc.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				if h["command"] == "keep-me" && h["shell"] == nil {
+					foreign["keep-me"] = true
+				}
+				if h["command"] == "Write-Output read" && h["shell"] == "powershell" {
+					foreign["Write-Output read"] = true
+				}
+			}
+		}
+	}
+	if !foreign["keep-me"] || !foreign["Write-Output read"] {
+		t.Errorf("foreign hooks not kept as they were: %v\n%s", foreign, first)
+	}
+
+	res2, err := Install(p, winBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Hooks != "already present" {
+		t.Errorf("second Hooks = %q, want already present", res2.Hooks)
+	}
+	if again, _ := os.ReadFile(settingsPath); !bytes.Equal(again, first) {
+		t.Errorf("re-run changed settings:\n%s", again)
 	}
 }
