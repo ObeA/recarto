@@ -63,7 +63,9 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	}
 	check(name, err == nil && integ == "ok", integ)
 	if err != nil || integ != "ok" {
-		fmt.Fprintln(w, "  hint: run 'recarto repair' to rebuild the store, salvaging your memories")
+		if _, err := fmt.Fprintln(w, "  hint: run 'recarto repair' to rebuild the store, salvaging your memories"); err != nil {
+			return err
+		}
 	}
 
 	reportLastRepair(ctx, a, w)
@@ -99,7 +101,9 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	// Sync reachability is diagnostic only: an unreachable server must never
 	// fail doctor (offline mode is the floor), so this check never flips allOK.
 	if a.Sync == nil {
-		fmt.Fprintln(w, "[ok] sync: disabled")
+		if _, err := fmt.Fprintln(w, "[ok] sync: disabled"); err != nil {
+			return err
+		}
 	} else {
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err := a.Sync.Ping(pctx)

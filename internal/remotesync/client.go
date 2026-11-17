@@ -178,7 +178,7 @@ func (c *Client) Import(ctx context.Context, gz io.Reader) (syncwire.ImportRespo
 	if err != nil {
 		return syncwire.ImportResponse{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // closing a read body loses nothing
 	var out syncwire.ImportResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return syncwire.ImportResponse{}, err
