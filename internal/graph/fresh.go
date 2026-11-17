@@ -88,6 +88,9 @@ func (p *refreshProgress) detail() string {
 // attempt no new one starts for refreshFailureCooldown; the failure rides along
 // in Detail.
 func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, token string, wait time.Duration) Freshness {
+	// A lost mark only lets the sweep drop this graph sooner, and the next query
+	// re-indexes it; a query must never fail over it.
+	_ = e.MarkUsed(ctx, worktree)
 	if e.graphFresh(ctx, worktree, token) {
 		return Freshness{State: Fresh}
 	}

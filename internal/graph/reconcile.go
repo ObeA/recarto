@@ -501,6 +501,11 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 // leaves both mtime and size byte-for-byte identical, which a real write does not
 // produce.
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string, opts ...ReconcileOption) error {
+	// The mark comes before the freshness check and the reconcile's reads, so a
+	// sweep pruning this worktree concurrently sees it and stops (see PruneWorktree).
+	if err := e.MarkUsed(ctx, worktree); err != nil {
+		return err
+	}
 	var o reconcileOptions
 	for _, opt := range opts {
 		opt(&o)

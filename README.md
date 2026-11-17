@@ -209,7 +209,7 @@ hooks fire automatically. The CLI is available for inspection and scripting:
 ```
 recarto config            turn features on or off (interactive; or list|enable|disable|path)
 recarto licenses          print Recarto's licence and the third-party notices
-recarto status            repo id, branch, memory counts, ledger
+recarto status            repo id, branch, store size, indexed worktrees, memory counts, ledger
 recarto doctor            health checks (db, WAL, integrity, git) (--quick: faster integrity check)
 recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
 recarto forget <id>       hard-delete a memory by id
@@ -222,7 +222,7 @@ recarto graph <sub>       query the code graph (search|grep|callers|callees|impl
                           graph impls <Type> [--super]  (implementations/subtypes; --super for supertypes)
                           graph annotated <Attribute>  (symbols decorated with [Attribute] / @decorator)
                           graph outline <file>  (a file's symbols/signatures/lines, instead of reading it)
-recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
+recarto compact           prune/decay memory + drop the graph of dead and unused worktrees (--force --dry-run --budget-tokens --vacuum)
 recarto repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
@@ -440,6 +440,15 @@ Measure-Command { recarto recall "auth flow" }
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the
   checkout's HEAD changes. Measurements: `docs/validation/2026-10-22-hook-startup.md`.
+- **Worktrees.** Each worktree has its own copy of the code graph in the shared store.
+  The copy is dropped when the worktree's directory is gone, or when Recarto has not
+  been used in it for 7 days: no session, hook, graph query or `recarto index`.
+  `RECARTO_UNUSED_WORKTREE_DAYS` sets the number of days (up to 36500); `0` keeps
+  unused worktrees. Memories, bugs and todos stay. The next session or graph query in
+  that worktree indexes it again. Session start and `recarto compact` drop them;
+  `recarto compact --dry-run` lists what it would drop, and `--vacuum` returns the
+  freed space to the OS. `recarto status` shows the store's size and how many
+  worktrees it indexes.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust, Python via tree-sitter.
 
 ## If the store gets corrupted

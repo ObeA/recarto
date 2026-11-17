@@ -332,6 +332,9 @@ func moduleOf(roots []string, names map[string]string, path string) string {
 // different computation never serves a predecessor's cache.
 const archCacheVersion = 3
 
+// archCacheKey prefixes the meta key holding a worktree's cached code map.
+const archCacheKey = "arch_cache:"
+
 // archCachePayload is the meta-table cache entry: the full architecture, valid
 // exactly while the worktree's graph token equals Token.
 type archCachePayload struct {
@@ -355,7 +358,7 @@ func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Arch
 	var token string
 	_ = e.st.DB.QueryRowContext(ctx,
 		`SELECT value FROM meta WHERE key=?`, "graph_token:"+worktree).Scan(&token)
-	cacheKey := "arch_cache:" + worktree
+	cacheKey := archCacheKey + worktree
 	if token != "" {
 		var raw string
 		if err := e.st.DB.QueryRowContext(ctx,
