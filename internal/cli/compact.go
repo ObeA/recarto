@@ -41,7 +41,9 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) error 
 			return err
 		}
 		_ = a.Store.Checkpoint(ctx)
-		fmt.Fprintln(w, "vacuumed: freed pages returned to the OS")
+		if _, err := fmt.Fprintln(w, "vacuumed: freed pages returned to the OS"); err != nil {
+			return err
+		}
 	}
 
 	rep, err := a.Engine.Compact(ctx, memory.CompactOptions{
@@ -51,8 +53,8 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) error 
 		return err
 	}
 	if !rep.Ran {
-		fmt.Fprintln(w, "compaction skipped (ran recently; use --force to override)")
-		return nil
+		_, err := fmt.Fprintln(w, "compaction skipped (ran recently; use --force to override)")
+		return err
 	}
 	p := ""
 	if *dry {

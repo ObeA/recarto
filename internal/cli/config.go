@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +26,9 @@ func hintInit(out io.Writer, path string, change func() error) error {
 	before := instructions()
 	err := change()
 	if instructions() != before {
-		fmt.Fprintln(out, initHint)
+		if _, perr := fmt.Fprintln(out, initHint); perr != nil {
+			return errors.Join(err, perr)
+		}
 	}
 	return err
 }
