@@ -215,7 +215,7 @@ foreach ($row in $rows) {
     }
     $differs = @()
     foreach ($l in 'PowerShell', 'Git Bash') {
-        if ($replies.ContainsKey($l) -and $replies[$l] -ne $replies['direct']) { $differs += $l }
+        if ($replies.ContainsKey($l) -and $replies[$l] -cne $replies['direct']) { $differs += $l }
     }
     $results[$row.Name] = @{ Med = $med; Failed = $failed; Differs = $differs }
 }

@@ -301,7 +301,8 @@ const winBinary = `C:\Users\Jane Doe\AppData\Local\Programs\recarto\recarto.exe`
 
 // windowsHandlers counts the exec-form handlers that run binary, keyed by
 // event, matcher, if and args. It fails the test for a recarto handler that
-// sets a shell or is still in shell form.
+// sets a shell, is still in shell form, or whose command is not exactly binary
+// (exec form cannot start a quoted path).
 func windowsHandlers(t *testing.T, settingsPath, binary string) map[string]int {
 	t.Helper()
 	b, err := os.ReadFile(settingsPath)
@@ -330,6 +331,10 @@ func windowsHandlers(t *testing.T, settingsPath, binary string) map[string]int {
 				}
 				if strings.Contains(command, " hook ") {
 					t.Errorf("recarto handler still in shell form: %v", h)
+					continue
+				}
+				if command != binary {
+					t.Errorf("recarto handler command = %q, want %q", command, binary)
 					continue
 				}
 				raw, ok := h["args"].([]any)
