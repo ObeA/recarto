@@ -144,9 +144,7 @@ func TestWarmIndexesServedReposAndCachesTheirMap(t *testing.T) {
 	for i, mod := range []string{"api", "lib"} {
 		rc := repos[i]
 		wt := rc.Git.Worktree
-		if _, done, err := rc.Graph.CodeMap(ctx, wt, false); err != nil || !done {
-			t.Fatalf("%s: CodeMap done = %v, %v; want a finished index", wt, done, err)
-		}
+		// Nothing reads the map before the nodes go: a read of a finished index caches the map itself.
 		if err := rc.Store.WriteTx(ctx, func(c store.Conn) error {
 			_, err := c.ExecContext(ctx, `DELETE FROM nodes`)
 			return err
