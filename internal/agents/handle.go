@@ -22,6 +22,9 @@ import (
 // neutral result. It is exit-0 advisory: callers treat any returned error as
 // non-blocking. RunHook always encodes the (possibly partial) Result first.
 func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
+	// Every hook that reaches the store counts as use of its worktree. A lost
+	// mark only lets the sweep drop this graph sooner; the next use re-indexes it.
+	_ = a.Graph.MarkUsed(ctx, a.Git.Worktree)
 	switch ev.Kind {
 	case KindSessionStart:
 		return handleSessionStart(ctx, a, ev)
@@ -314,14 +317,14 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 		for _, rc := range a.Repos {
 			_ = rc.Graph.ReconcileIfStale(sctx, rc.Git.Worktree, newGraphSource(rc.Git.Worktree), graph.WorktreeToken(rc.Git.Worktree))
 		}
-		// Opportunistic worktree GC, inside the same hard budget: a deleted git
-		// worktree leaves its entire graph copy in the shared store until swept.
-		// Batched deletes commit progress, so abandonment at the budget is safe.
-		if dead, err := a.DeadWorktrees(sctx); err == nil && len(dead) > 0 {
-			for _, wt := range dead {
-				_ = a.Graph.PruneWorktree(sctx, wt)
-			}
-			_ = a.Store.Checkpoint(sctx)
+		// Opportunistic worktree GC, inside the same hard budget: a deleted or
+		// unused worktree keeps its graph copy in the shared store until swept.
+		// The sweep is best-effort, and every committed prune step leaves a state
+		// the next sweep or use recovers from, so abandoning it is safe. A failed
+		// sweep is retried by the next session start, and `recarto compact`
+		// reports its error.
+		if p, err := a.PrunableWorktrees(sctx); err == nil {
+			_, _ = a.PruneWorktrees(sctx, p)
 		}
 	}()
 	select {

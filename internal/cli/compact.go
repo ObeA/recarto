@@ -21,19 +21,37 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) error 
 		return err
 	}
 
-	// Graph-side GC runs regardless of the memory gate: a deleted git worktree
-	// leaves its entire graph copy (often the bulk of the store) until swept.
-	if dead, derr := a.DeadWorktrees(ctx); derr == nil && len(dead) > 0 {
-		if *dry {
-			fmt.Fprintf(w, "[dry-run] would prune %d dead worktree(s): %v\n", len(dead), dead)
-		} else {
-			for _, wt := range dead {
-				if err := a.Graph.PruneWorktree(ctx, wt); err != nil {
+	// Graph-side GC runs regardless of the memory gate: a deleted or unused git
+	// worktree keeps its entire graph copy (often the bulk of the store) until swept.
+	wts, err := a.PrunableWorktrees(ctx)
+	if err != nil {
+		return err
+	}
+	if *dry {
+		if len(wts.Dead) > 0 {
+			if _, err := fmt.Fprintf(w, "[dry-run] would prune %d dead worktree(s): %v\n", len(wts.Dead), wts.Dead); err != nil {
+				return err
+			}
+		}
+		if len(wts.Unused) > 0 {
+			if _, err := fmt.Fprintf(w, "[dry-run] would prune %d worktree(s) not used for more than %d days:\n", len(wts.Unused), wts.Days); err != nil {
+				return err
+			}
+			for _, u := range wts.Unused {
+				if _, err := fmt.Fprintf(w, "  %s  last used %s\n", u.Worktree, u.LastUsed.Format("2006-01-02 15:04")); err != nil {
 					return err
 				}
 			}
-			_ = a.Store.Checkpoint(ctx)
-			fmt.Fprintf(w, "worktrees pruned: %d (add --vacuum to return the space to the OS)\n", len(dead))
+		}
+	} else {
+		n, err := a.PruneWorktrees(ctx, wts)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			if _, err := fmt.Fprintf(w, "worktrees pruned: %d (add --vacuum to return the space to the OS)\n", n); err != nil {
+				return err
+			}
 		}
 	}
 	if *vacuum && !*dry {

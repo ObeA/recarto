@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/memory"
@@ -15,6 +16,20 @@ func Status(ctx context.Context, a *app.App, w io.Writer) error {
 	fmt.Fprintf(w, "repo:     %s (%s)\n", a.Git.RepoName, a.Git.RepoID)
 	fmt.Fprintf(w, "branch:   %s\n", a.Git.Branch)
 	fmt.Fprintf(w, "worktree: %s\n", a.Git.Worktree)
+	fi, err := os.Stat(a.Store.Path())
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "store:    %s (%s)\n", a.Store.Path(), sizeText(fi.Size())); err != nil {
+		return err
+	}
+	wts, err := a.Graph.Worktrees(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "graph:    %d worktree(s) indexed\n", len(wts)); err != nil {
+		return err
+	}
 
 	rows, err := a.Store.DB.QueryContext(ctx,
 		`SELECT kind, count(*) FROM memories WHERE status='active' GROUP BY kind ORDER BY kind`)

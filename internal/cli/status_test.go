@@ -3,9 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/gerwim/recarto/internal/graph"
 
 	"github.com/gerwim/recarto/internal/memory"
 )
@@ -43,6 +47,38 @@ func TestStatusShowsCompactionState(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"epoch", "archived", "live tokens", "compactions"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("status missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+// TestStatusShowsStoreAndWorktrees: status names the store with its size and
+// counts the worktrees it indexes.
+func TestStatusShowsStoreAndWorktrees(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.go"), []byte("package p\nfunc A(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, wt := range []string{"/wtA", "/wtB"} {
+		if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: src}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	if err := Status(ctx, a, &buf); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(a.Store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"graph:    2 worktree(s) indexed",
+		"store:    " + a.Store.Path() + " (" + sizeText(fi.Size()) + ")",
+	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("status missing %q:\n%s", want, buf.String())
 		}

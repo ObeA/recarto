@@ -158,7 +158,7 @@ func usage(w io.Writer) error {
   licenses          print Recarto's licence and the third-party notices
   serve             run the MCP server over stdio
   hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]
-  status            repo id, branch, memory counts, ledger
+  status            repo id, branch, store size, indexed worktrees, memory counts, ledger
   doctor            health checks (db, WAL, integrity, git) (--quick: faster integrity check)
   repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
   remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
@@ -169,7 +169,7 @@ func usage(w io.Writer) error {
   memory show       render all active memory as markdown (--branch)
   index             build/refresh the code graph for this worktree (--force: full rebuild/heal)
   graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)
-  compact           prune/decay memory + sweep dead worktrees (--force --dry-run --budget-tokens --vacuum)
+  compact           prune/decay memory + drop the graph of dead and unused worktrees (--force --dry-run --budget-tokens --vacuum)
   snapshot          export|import the committable team memory (.recarto/memory.jsonl)
   todo list|done    list open todos, or mark one done
   update            self-update to the latest (or a chosen) release (--version --list --check --yes)
