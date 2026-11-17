@@ -197,8 +197,8 @@ func TestServeHandshakeIgnoresTheStoreWriteLock(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	// A different repo_name makes the background open write its meta.
-	if _, err := conn.ExecContext(ctx, `UPDATE meta SET value='other' WHERE key='repo_name'`); err != nil {
+	// A different version makes the background open write its meta.
+	if _, err := conn.ExecContext(ctx, `UPDATE meta SET value='0.0.0-old' WHERE key='recarto_version'`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
