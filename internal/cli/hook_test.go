@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -116,23 +117,41 @@ func TestRunHookFailsOpen(t *testing.T) {
 	}
 }
 
-func TestRunHookPostEditOutsideServedReposOpensNoStore(t *testing.T) {
+// An event whose files and search paths all lie outside every served repo
+// opens no store; one that reaches the served repo does.
+func TestRunHookOutsideServedReposOpensNoStore(t *testing.T) {
 	t.Chdir(t.TempDir()) // a non-git cwd serves only itself
-	cache := t.TempDir()
-	t.Setenv("RECARTO_CACHE_DIR", cache)
+	cwd, _ := os.Getwd()
 	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_REPOS", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY"} {
 		t.Setenv(k, "")
 	}
-	file, _ := json.Marshal(filepath.Join(t.TempDir(), "x.go"))
-	var out bytes.Buffer
-	runHook(context.Background(), strings.NewReader(`{"session_id":"s","tool_input":{"file_path":`+string(file)+`}}`), &out, []string{"post-edit"})
-	if out.Len() != 0 {
-		t.Errorf("output %q", out.String())
+	outside := t.TempDir()
+	payload := func(input map[string]string) string {
+		b, _ := json.Marshal(map[string]any{"session_id": "s", "cwd": cwd, "tool_input": input})
+		return string(b)
 	}
-	entries, _ := os.ReadDir(cache)
-	for _, e := range entries {
-		if e.Name() != "gitctx" {
-			t.Errorf("post-edit outside every served repo opened a store: %s", e.Name())
+	for _, tc := range []struct {
+		name, event, payload string
+		opens                bool
+	}{
+		{"post-edit outside", "post-edit", payload(map[string]string{"file_path": filepath.Join(outside, "x.go")}), false},
+		{"grep outside", "augment", payload(map[string]string{"pattern": "Foo", "path": outside}), false},
+		{"shell search outside", "shell", payload(map[string]string{"command": "rg Foo " + filepath.ToSlash(outside)}), false},
+		{"grep inside", "augment", payload(map[string]string{"pattern": "Foo", "path": cwd}), true},
+		{"shell search inside", "shell", payload(map[string]string{"command": "rg Foo ."}), true},
+	} {
+		cache := t.TempDir()
+		t.Setenv("RECARTO_CACHE_DIR", cache)
+		t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+		var out bytes.Buffer
+		runHook(context.Background(), strings.NewReader(tc.payload), &out, []string{tc.event})
+		if !tc.opens && out.Len() != 0 {
+			t.Errorf("%s: output %q", tc.name, out.String())
+		}
+		entries, _ := os.ReadDir(cache)
+		opened := slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() != "gitctx" })
+		if opened != tc.opens {
+			t.Errorf("%s: opened a store = %v, want %v", tc.name, opened, tc.opens)
 		}
 	}
 }

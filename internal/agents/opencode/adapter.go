@@ -25,6 +25,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Source     string `json:"source"`
 		FilePath   string `json:"file_path"`
 		Pattern    string `json:"pattern"`
+		Path       string `json:"path"`
 		ToolResult string `json:"tool_result"`
 		Command    string `json:"command"`
 		CWD        string `json:"cwd"`
@@ -41,6 +42,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Source:     p.Source,
 		FilePath:   p.FilePath,
 		Pattern:    p.Pattern,
+		Path:       p.Path,
 		ToolResult: p.ToolResult,
 		Command:    p.Command,
 		CWD:        p.CWD,

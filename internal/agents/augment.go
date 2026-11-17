@@ -133,14 +133,49 @@ const (
 	hintMax       = 800
 )
 
-// searchHint returns the hint for one tool call's search patterns, "" when it
-// has nothing to list. See README "Search hints".
-func searchHint(ctx context.Context, a *app.App, scope string, patterns []string) (string, error) {
-	pending, names, err := hintPatterns(ctx, a, scope, patterns)
+// searchRepos returns the served repos, in AllRepos order, that a search over
+// paths reaches: the repo each path lies in (the innermost, as owningRepo picks
+// it) and every repo a path contains. nil paths reach every served repo; paths
+// outside all of them reach none. Reaches is its store-free form. The contexts
+// come from one AllRepos call: hint hits are matched to them by pointer.
+func searchRepos(a *app.App, paths []string) []*app.RepoContext {
+	all := a.AllRepos() // fresh contexts per call
+	if paths == nil {
+		return all
+	}
+	var out []*app.RepoContext
+	for _, rc := range all {
+		if slices.ContainsFunc(paths, func(p string) bool {
+			owner, _, ok := owningRepo(all, p)
+			_, contains := within(p, rc.Git.Worktree)
+			return ok && owner == rc || contains
+		}) {
+			out = append(out, rc)
+		}
+	}
+	return out
+}
+
+// searchHint returns the hint for one tool call's search patterns over repos,
+// "" when it has nothing to list. See README "Search hints".
+func searchHint(ctx context.Context, a *app.App, scope string, repos []*app.RepoContext, patterns []string) (string, error) {
+	if len(repos) == 0 {
+		return "", nil
+	}
+	key := searchMetric
+	if all := a.AllRepos(); len(repos) < len(all) {
+		// A hint over some served repos only must not silence the same
+		// pattern's hint in another one.
+		ids := make([]string, len(repos))
+		for i, rc := range repos {
+			ids[i] = rc.Git.RepoID
+		}
+		key += "@" + strings.Join(ids, ",") + ":"
+	}
+	pending, names, err := hintPatterns(ctx, a, scope, key, patterns)
 	if err != nil || len(names) == 0 {
 		return "", err
 	}
-	repos := a.AllRepos() // fresh contexts per call; listed hits are matched to these by pointer
 	symbols, listed, size, err := hintSymbols(ctx, a, repos, names)
 	if err != nil || len(listed) == 0 {
 		return "", err
@@ -157,7 +192,7 @@ func searchHint(ctx context.Context, a *app.App, scope string, patterns []string
 				return slices.Contains(ids, h.r.Name) || slices.Contains(ids, h.r.QualifiedName)
 			}) {
 				// A lost mark only lets the pattern hint again.
-				_ = a.Ledger.Incr(ctx, scope, searchMetric+p, 1)
+				_ = a.Ledger.Incr(ctx, scope, key+p, 1)
 			}
 		}
 	}
@@ -172,8 +207,8 @@ type hintHit struct {
 
 // hintPatterns returns the identifiers of each pattern not yet hinted in
 // scope's conversation, and all of them deduped. A repeat is counted in
-// repeated_augments_blocked.
-func hintPatterns(ctx context.Context, a *app.App, scope string, patterns []string) (map[string][]string, []string, error) {
+// repeated_augments_blocked. key+pattern is a pattern's ledger mark.
+func hintPatterns(ctx context.Context, a *app.App, scope, key string, patterns []string) (map[string][]string, []string, error) {
 	pending := map[string][]string{}
 	seen := map[string]bool{}
 	var names []string
@@ -187,7 +222,7 @@ func hintPatterns(ctx context.Context, a *app.App, scope string, patterns []stri
 			continue
 		}
 		if scope != "" {
-			n, err := a.Ledger.Get(ctx, scope, searchMetric+p)
+			n, err := a.Ledger.Get(ctx, scope, key+p)
 			if err != nil {
 				return nil, nil, err
 			}

@@ -17,7 +17,8 @@ type Adapter struct{}
 // (sized for the read ledger) comes from tool_response, falling back to the
 // tool_result spelling older payloads used. A Bash call carries its command in
 // tool_input and the session's working directory in cwd. A Read also yields
-// whether it asked for a line range and which lines it returned. A hook fired
+// whether it asked for a line range and which lines it returned. A Grep/Glob
+// call carries its search path in tool_input.path. A hook fired
 // in a subagent carries its agent_id.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
@@ -28,6 +29,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		ToolInput struct {
 			FilePath string `json:"file_path"`
 			Pattern  string `json:"pattern"`
+			Path     string `json:"path"`
 			Query    string `json:"query"`
 			Command  string `json:"command"`
 			Offset   any    `json:"offset"`
@@ -56,6 +58,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Source:     p.Source,
 		FilePath:   p.ToolInput.FilePath,
 		Pattern:    pattern,
+		Path:       p.ToolInput.Path,
 		ToolResult: string(result),
 		StopActive: p.StopHookActive,
 		Command:    p.ToolInput.Command,
