@@ -61,7 +61,7 @@ await hooks["session.context"](r2);
 const after = (tool, input, result) => ({ tool, sessionID: "root", status: "completed", input, result });
 const read = after("read", { path: "a.go", offset: 10, limit: 5 }, { content: [{ type: "text", text: "file body" }] });
 const listing = after("read", { path: "." }, { content: "listing", output: { type: "list-page" } });
-const grep = after("grep", { pattern: "Foo" }, { content: "1 match" });
+const grep = after("grep", { pattern: "Foo", path: "sub" }, { content: "1 match" });
 const edit = after("edit", { path: "b.go" }, { content: [{ type: "text", text: "Edited" }] });
 const patch = after("patch", { patchText: "*** Begin Patch" }, { content: "ok", output: { applied: [{ target: "/abs/c.go" }, { target: "/abs/d.go" }] } });
 const web = after("websearch", { query: "Foo" }, { content: "web" });
@@ -80,6 +80,8 @@ const sys = { system: [] };
 await v1["experimental.chat.system.transform"]({ sessionID: "v1s" }, sys);
 const v1read = { title: "", output: "body", metadata: {} };
 await v1["tool.execute.after"]({ tool: "read", sessionID: "v1s", callID: "c", args: { filePath: "e.go", offset: 3 } }, v1read);
+const v1grep = { title: "", output: "hits", metadata: {} };
+await v1["tool.execute.after"]({ tool: "grep", sessionID: "v1s", callID: "g", args: { pattern: "Foo", path: "/abs/w" } }, v1grep);
 const v1bash = { title: "", output: "hits", metadata: {} };
 await v1["tool.execute.after"]({ tool: "bash", sessionID: "v1s", callID: "d", args: { command: "grep -rn Foo .", workdir: "/abs/w" } }, v1bash);
 const v1test = { title: "", output: "ok", metadata: {} };
@@ -91,7 +93,7 @@ console.log(JSON.stringify({
   read: read.result.content, listing: listing.result.content, grep: grep.result.content,
   edit: edit.result.content, patch: patch.result.content, web: web.result.content,
   bash: bash.result.content, shell: shell.result.content, build: build.result.content,
-  synthetic, v1sys: sys.system, v1read: v1read.output, v1bash: v1bash.output, v1test: v1test.output,
+  synthetic, v1sys: sys.system, v1read: v1read.output, v1grep: v1grep.output, v1bash: v1bash.output, v1test: v1test.output,
 }));
 `
 
@@ -153,6 +155,7 @@ func TestPluginRunsUnderNode(t *testing.T) {
 		"synthetic": []any{map[string]any{"sessionID": "root", "text": "NUDGE"}},
 		"v1sys":     []any{"CTX-START"},
 		"v1read":    "body\n\nCTX-post-read",
+		"v1grep":    "hits\n\nCTX-augment",
 		"v1bash":    "hits\n\nCTX-shell",
 		"v1test":    "ok",
 	}
@@ -182,7 +185,7 @@ func TestPluginRunsUnderNode(t *testing.T) {
 	wantCalls := []string{
 		"session-start session_id=root", // once for two requests of the session
 		"post-read file_path=<dir>/a.go limit=5 offset=10 session_id=root tool_result=file body",
-		"augment pattern=Foo session_id=root",
+		"augment cwd=<dir> path=sub pattern=Foo session_id=root",
 		"post-edit file_path=<dir>/b.go session_id=root",
 		"post-edit file_path=/abs/c.go session_id=root",
 		"post-edit file_path=/abs/d.go session_id=root",
@@ -191,6 +194,7 @@ func TestPluginRunsUnderNode(t *testing.T) {
 		"stop session_id=root", // the subagent session is skipped
 		"session-start session_id=v1s",
 		"post-read file_path=<dir>/e.go offset=3 session_id=v1s tool_result=body",
+		"augment cwd=<dir> path=/abs/w pattern=Foo session_id=v1s",
 		"shell command=grep -rn Foo . cwd=/abs/w session_id=v1s",
 		"post-edit file_path=/abs/f.go",
 	}

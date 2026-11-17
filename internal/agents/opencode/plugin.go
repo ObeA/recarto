@@ -100,7 +100,7 @@ const setup = async (ctx) => {
         const text = contentOf(event.result).map((c) => c.text || "").join("\n");
         append(event, (await run(dir, "post-read", { ...base, file_path: abs(input.path), tool_result: text, offset: input.offset, limit: input.limit })).additionalContext);
       } else if (event.tool === "grep" || event.tool === "glob") {
-        append(event, (await run(dir, "augment", { ...base, pattern: input.pattern || "" })).additionalContext);
+        append(event, (await run(dir, "augment", { ...base, pattern: input.pattern || "", path: input.path, cwd: dir })).additionalContext);
       } else if (isShell(event.tool, input.command)) {
         append(event, (await run(dir, "shell", { ...base, command: input.command, cwd: abs(input.workdir) || dir })).additionalContext);
       } else if (event.tool === "edit" || event.tool === "write" || event.tool === "patch") {
@@ -167,7 +167,7 @@ const server = async ({ directory }) => {
         if (input.tool === "read") {
           r = await run(directory, "post-read", { ...base, file_path: abs(args.filePath), tool_result: (output && output.output) || "", offset: args.offset, limit: args.limit });
         } else if (input.tool === "grep" || input.tool === "glob") {
-          r = await run(directory, "augment", { ...base, pattern: args.pattern || "" });
+          r = await run(directory, "augment", { ...base, pattern: args.pattern || "", path: args.path, cwd: directory });
         } else if (isShell(input.tool, args.command)) {
           r = await run(directory, "shell", { ...base, command: args.command, cwd: abs(args.workdir) || directory });
         }

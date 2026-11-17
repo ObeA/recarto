@@ -82,14 +82,14 @@ func agentOrDefault(s string) string {
 	return s
 }
 
-// owningRepo maps an absolute file path to the served repo containing it —
+// owningRepo maps an absolute file path to the served repo among repos containing it —
 // the primary, or a RECARTO_REPOS extra — returning that repo's context and
 // the repo-relative path. Longest worktree prefix wins (a nested checkout
 // belongs to the inner repo). ok=false when no served worktree contains the
 // file, or the path is not absolute.
-func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok bool) {
+func owningRepo(repos []*app.RepoContext, abs string) (rc *app.RepoContext, rel string, ok bool) {
 	bestLen := -1
-	for _, cand := range a.AllRepos() {
+	for _, cand := range repos {
 		wt := cand.Git.Worktree
 		if r, in := within(wt, abs); in && len(wt) > bestLen {
 			rc, rel, ok, bestLen = cand, r, true, len(wt)
@@ -103,6 +103,20 @@ func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok boo
 func Owned(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
 		if _, in := within(wt, abs); in {
+			return true
+		}
+	}
+	return false
+}
+
+// Reaches reports whether a search over the absolute path abs reaches one of
+// the worktrees: abs lies in one or contains one. It is the store-free form of
+// searchRepos, against app.Worktrees: true exactly when searchRepos finds a repo.
+func Reaches(worktrees []string, abs string) bool {
+	for _, wt := range worktrees {
+		_, in := within(wt, abs)
+		_, contains := within(abs, wt)
+		if in || contains {
 			return true
 		}
 	}
@@ -432,9 +446,10 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// sibling repo's file (a verifier in a scratch dir, RECARTO_REPOS) must
 	// surface THAT repo's anchored memories, with the path made relative to
 	// that repo's root so it matches how the anchors were recorded.
-	target, rel, owned := owningRepo(a, file)
+	all := a.AllRepos()
+	target, rel, owned := owningRepo(all, file)
 	if !owned {
-		target, rel = a.AllRepos()[0], memory.RelFileRef(a.Git.Worktree, file)
+		target, rel = all[0], memory.RelFileRef(a.Git.Worktree, file)
 	}
 
 	first, last := ev.ReadFirst, ev.ReadLast
@@ -529,7 +544,7 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// RECARTO_REPOS extra) so its anchored memories fire and ITS graph is
 	// reindexed — with the path relative to that repo's root, matching how
 	// anchors and graph files are keyed.
-	target, rel, owned := owningRepo(a, abs)
+	target, rel, owned := owningRepo(a.AllRepos(), abs)
 	if !owned {
 		return Result{}, nil // outside every served worktree; ignore
 	}
@@ -558,12 +573,12 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 }
 
 // handleAugment answers a Grep/Glob call with the search hint for its pattern
-// (see searchHint).
+// over the served repos the call's path reaches (see searchHint).
 func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if ev.Pattern == "" || !a.Features.On(features.SearchHints) {
 		return Result{}, nil
 	}
-	hint, err := searchHint(ctx, a, conversation(ev), []string{ev.Pattern})
+	hint, err := searchHint(ctx, a, conversation(ev), searchRepos(a, ev.SearchPaths), []string{ev.Pattern})
 	return Result{Context: hint}, err
 }
 
@@ -577,15 +592,17 @@ const shellSearchNudge = "Recarto: next time, search with its MCP tools instead 
 // views. The line's searches share one search hint, capped like a Grep/Glob
 // call's, and the session's first shell search adds shellSearchNudge. Each printed file in
 // a served repo surfaces its anchored memories, deduped exactly like a Read —
-// without a Read's counters, repeat warning or large-file nudge.
+// without a Read's counters, repeat warning or large-file nudge. A search whose
+// paths all lie outside the served repos adds no hint and no nudge.
 func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if !a.Features.On(features.ShellHints) {
 		return Result{}, nil
 	}
 	var msgs []string
 	scope := conversation(ev)
+	repos := searchRepos(a, ev.SearchPaths)
 	if a.Features.On(features.SearchHints) {
-		hint, err := searchHint(ctx, a, scope, ev.Patterns)
+		hint, err := searchHint(ctx, a, scope, repos, ev.Patterns)
 		if err != nil {
 			return Result{}, err
 		}
@@ -593,14 +610,15 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			msgs = append(msgs, hint)
 		}
 	}
-	if len(ev.Patterns) > 0 && scope != "" && a.Features.On(features.GraphTools) {
+	if len(ev.Patterns) > 0 && len(repos) > 0 && scope != "" && a.Features.On(features.GraphTools) {
 		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
 			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)
 			msgs = append(msgs, shellSearchNudge)
 		}
 	}
+	all := a.AllRepos()
 	for _, f := range ev.Files {
-		if target, rel, ok := owningRepo(a, f); ok {
+		if target, rel, ok := owningRepo(all, f); ok {
 			msgs = append(msgs, anchoredNotes(ctx, a, scope, target, rel)...)
 		}
 	}

@@ -314,8 +314,11 @@ After a Grep or Glob call, or a shell search, Recarto lists the symbols the sear
   - it is anchored to a listed symbol or to the file that defines one;
   - Recarto's branch check does not flag it as referencing code missing from this worktree;
   - this conversation has not been shown it.
+- **Scope.** A search that names paths lists symbols and bugs only from the served repos (this worktree and the `RECARTO_REPOS` repos) its paths lie in or contain. If all its paths lie outside them, it adds nothing and does not count as a repeat. A search with no path covers every served repo.
 - **Size.** A search that names no symbol adds nothing. One tool call adds at most 800 characters of hint, however many searches it runs.
 - **Repeats.** A pattern that already got a hint in this conversation, from the shell or Grep/Glob, adds nothing. `recarto status` counts these under `repeated_augments_blocked`.
+
+On OpenCode, re-run `recarto init` after upgrading so the plugin passes the Grep and Glob path.
 
 ## Shell searches and file views
 
@@ -362,6 +365,9 @@ Recarto adds nothing to:
 - PowerShell and cmd: Claude Code's `PowerShell` tool, Copilot's `powershell` tool, and
   OpenCode's shell when it runs PowerShell or cmd. On Windows these hosts keep their own
   grep/glob/read tools, which Recarto hooks;
+- searches whose paths all lie outside every served repo, like `rg Foo ~/other-project` or
+  `find /tmp/x -name '*Foo*'`, not even the nudge. A search path built from a variable
+  counts as no path;
 - a command it cannot parse.
 
 Shell views are not counted as reads, so they get no repeat-read notice, large-file

@@ -152,3 +152,40 @@ func TestGitBashPath(t *testing.T) {
 		}
 	}
 }
+
+// The paths a line's searches name decide which served repos its hint covers.
+func TestParseShellSearchPaths(t *testing.T) {
+	dir := shellTree(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	o := t.TempDir()
+	so := filepath.ToSlash(o) // a shell word: backslashes would be escapes
+	in := filepath.Join(dir, "internal")
+	for _, tc := range []struct {
+		cmd, cwd string
+		want     []string
+	}{
+		{`rg Foo`, dir, nil},
+		{`grep -rn Foo internal/ ` + so, dir, []string{in, o}},
+		{`rg Foo internal/*.go`, dir, []string{in}},
+		{`find ` + so + ` -name '*Foo*'`, dir, []string{o}},
+		{`find -L -D tree -O3 ` + so + ` -name '*Foo*'`, dir, []string{o}},
+		{`bfs ` + so + ` -type f -mtime -7 -name '*Foo*' .`, dir, []string{o, dir}},
+		{`find . -name '*Foo*' -exec rg Bar ` + so + ` {} +`, dir, []string{dir}},
+		{`bfs -f -x -name '*Foo*'`, dir, []string{filepath.Join(dir, "-x")}},
+		{`find -newermt 2024-01-01 -name '*Foo*'`, dir, nil},
+		{`find -name '*Foo*'`, dir, nil},
+		{`rg Foo . && rg Bar`, dir, nil},
+		{`rg Foo "$D"`, dir, nil},
+		{`rg "$P" ` + so, dir, nil},
+		{`cd internal && rg Foo ..`, dir, []string{dir}},
+		{`grep -rn Foo ~/x`, dir, []string{filepath.Join(home, "x")}},
+		{`grep -rn Foo f.go internal`, dir, []string{filepath.Join(dir, "f.go"), in}},
+		{`rg Foo .`, "", nil},
+	} {
+		if got := parseShell(tc.cmd, tc.cwd).paths; !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: paths %q, want %q", tc.cmd, got, tc.want)
+		}
+	}
+}

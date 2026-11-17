@@ -30,6 +30,17 @@ func TestDecodeShell(t *testing.T) {
 	}
 }
 
+func TestDecodeAugmentPath(t *testing.T) {
+	in := strings.NewReader(`{"session_id":"s","pattern":"Foo","path":"src","cwd":"/w"}`)
+	ev, err := Adapter{}.Decode(agents.KindAugment, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Pattern != "Foo" || ev.Path != "src" || ev.CWD != "/w" {
+		t.Errorf("ev = %+v", ev)
+	}
+}
+
 func TestEncodeNeutral(t *testing.T) {
 	var sb strings.Builder
 	if err := (Adapter{}).Encode(agents.KindSessionStart, &sb, agents.Result{Context: "ctx"}); err != nil {

@@ -41,7 +41,8 @@ const noKind agents.EventKind = -1
 // generically from toolArgs so the adapter is resilient to Copilot's tool names.
 // A built-in tool reaching a hook kind it does not feed (a view at post-edit, an
 // edit at post-read) decodes without path or pattern, i.e. as an idle event. The
-// shell kind reads only the bash tool's command, run in the payload's cwd.
+// shell kind reads only the bash tool's command, run in the payload's cwd; a
+// grep or glob searches its path argument, taken from the same cwd.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID  string          `json:"sessionId"`
@@ -72,6 +73,9 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 	}
 	ev.FilePath = pickString(p.ToolArgs, "path", "filePath", "file_path", "file")
 	ev.Pattern = pickString(p.ToolArgs, "pattern", "query", "regex")
+	if kind == agents.KindAugment {
+		ev.Path, ev.CWD = pickString(p.ToolArgs, "path"), p.CWD
+	}
 	if kind == agents.KindPostRead {
 		r, _ := toolArgs(p.ToolArgs)["view_range"].([]any)
 		// Copilot shows the whole file for an empty or absent view_range.

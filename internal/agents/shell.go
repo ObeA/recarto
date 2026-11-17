@@ -26,6 +26,7 @@ type shellPlan struct {
 	owner    string   // the first ShellCommands key the line runs ("" when none)
 	patterns []string // search patterns: content regexes and file-name globs
 	files    []string // absolute paths of the files the line prints
+	paths    []string // absolute paths the line's searches name; nil when one names none or one that cannot be resolved
 }
 
 // parseShell reads a POSIX shell command line run in cwd ("" when unknown). A
@@ -37,10 +38,18 @@ func parseShell(command, cwd string) shellPlan {
 	}
 	w := &shellWalker{}
 	w.stmts(f.Stmts, cwd, false, true)
+	if w.unscoped {
+		w.plan.paths = nil
+	}
 	return w.plan
 }
 
-type shellWalker struct{ plan shellPlan }
+// The searches of one line share one hint, so they share one scope: the union
+// of their paths, unless one of them leaves the hint over every served repo.
+type shellWalker struct {
+	plan     shellPlan
+	unscoped bool // a search on the line names no path, or one that cannot be resolved
+}
 
 // stmts walks a statement list in order, threading the cwd a `cd` changes.
 // piped marks a statement whose input comes from a pipe; printed one whose
@@ -119,11 +128,15 @@ func (w *shellWalker) call(c *syntax.CallExpr, cwd string, piped, printed bool) 
 	}
 	switch key {
 	case "find", "bfs":
+		named := false
 		for i := 0; i+1 < len(args); i++ {
 			if a := args[i].val; a == "-name" || a == "-iname" || a == "-path" {
 				i++
-				w.pattern(args[i])
+				named = w.pattern(args[i]) || named
 			}
+		}
+		if named {
+			w.scope(findRoots(args), cwd)
 		}
 	case "cat":
 		w.views(options(args, "", nil, nil), cwd)
@@ -209,8 +222,12 @@ func (w *shellWalker) search(key string, args []shellWord, cwd string, piped boo
 		}
 	}
 	if scoped || len(files) == 0 && (key == "git" || !piped && (key == "rg" || recursive)) {
+		named := false
 		for _, p := range pats {
-			w.pattern(p)
+			named = w.pattern(p) || named // w.pattern first: it must run for every p
+		}
+		if named {
+			w.scope(ops, cwd)
 		}
 	}
 	w.views(files, cwd)
@@ -289,11 +306,93 @@ func options(args []shellWord, short string, long map[string]bool, opt func(name
 	return ops
 }
 
-// pattern records a search pattern once.
-func (w *shellWalker) pattern(p shellWord) {
-	if !p.dyn && p.val != "" && !slices.Contains(w.plan.patterns, p.val) {
+// pattern records a search pattern once and reports whether p is one.
+func (w *shellWalker) pattern(p shellWord) bool {
+	if p.dyn || p.val == "" {
+		return false
+	}
+	if !slices.Contains(w.plan.patterns, p.val) {
 		w.plan.patterns = append(w.plan.patterns, p.val)
 	}
+	return true
+}
+
+// scope records the paths a search names, resolved against cwd. A glob counts
+// from the directory before its first wildcard. A search that names no path,
+// or one that cannot be resolved, leaves the line's hint over every served repo.
+func (w *shellWalker) scope(paths []shellWord, cwd string) {
+	if len(paths) == 0 {
+		w.unscoped = true
+	}
+	for _, p := range paths {
+		v := p.val
+		if p.glob {
+			// Cut on "/" in the raw word: filepath.Dir would turn a Git Bash
+			// /c/x into \c\x on Windows before shellPath could map it.
+			v = v[:strings.IndexAny(v, "*?[")]
+			if i := strings.LastIndexByte(v, '/'); i >= 0 {
+				v = v[:i+1]
+			} else {
+				v = "."
+			}
+		}
+		abs := ""
+		if !p.dyn {
+			abs = shellPath(v, cwd)
+		}
+		if abs == "" {
+			w.unscoped = true
+		} else if !slices.Contains(w.plan.paths, abs) {
+			w.plan.paths = append(w.plan.paths, abs)
+		}
+	}
+}
+
+// findArity is how many words follow a find or bfs flag or primary as its
+// argument: GNU find's -D, bfs's -S, and the primaries of GNU find, BSD find
+// and bfs that take one (or, for -fprintf, two). Any other word starting with
+// "-" takes none.
+var findArity = map[string]int{
+	"-D": 1, "-S": 1, "-amin": 1, "-anewer": 1, "-atime": 1, "-Bmin": 1, "-Bnewer": 1, "-Btime": 1,
+	"-cmin": 1, "-cnewer": 1, "-context": 1, "-ctime": 1, "-files0-from": 1, "-flags": 1, "-fls": 1,
+	"-fprint": 1, "-fprint0": 1, "-fstype": 1, "-gid": 1, "-group": 1, "-ilname": 1, "-iname": 1,
+	"-inum": 1, "-ipath": 1, "-iregex": 1, "-iwholename": 1, "-limit": 1, "-links": 1, "-lname": 1,
+	"-maxdepth": 1, "-mindepth": 1, "-mmin": 1, "-mtime": 1, "-name": 1, "-newer": 1, "-path": 1,
+	"-perm": 1, "-printf": 1, "-regex": 1, "-regextype": 1, "-samefile": 1, "-size": 1, "-type": 1,
+	"-uid": 1, "-used": 1, "-user": 1, "-wholename": 1, "-xtype": 1,
+	"-fprintf": 2,
+}
+
+// findRoots returns the starting points of a find or bfs: every word that is
+// not a flag, an operator, a primary or a primary's argument, plus the value of
+// -f. GNU find takes them only before its expression, bfs anywhere; one walk
+// reads both.
+func findRoots(args []shellWord) []shellWord {
+	var roots []shellWord
+	for i := 0; i < len(args); i++ {
+		a := args[i].val
+		switch {
+		case a == "-f":
+			if i+1 < len(args) {
+				i++
+				roots = append(roots, args[i])
+			}
+		case a == "-exec" || a == "-execdir" || a == "-ok" || a == "-okdir":
+			for i+1 < len(args) && args[i+1].val != ";" && args[i+1].val != "+" {
+				i++ // the command run on each match names no starting point
+			}
+			i++
+		case strings.HasPrefix(a, "-newer") && len(a) == len("-newer")+2:
+			i++
+		case findArity[a] > 0:
+			i += findArity[a]
+		case strings.HasPrefix(a, "-") || a == "(" || a == ")" || a == "!" || a == ",":
+			// a flag, a primary without argument or an operator
+		default:
+			roots = append(roots, args[i])
+		}
+	}
+	return roots
 }
 
 // views records the regular files among ops as printed.
@@ -354,6 +453,31 @@ func shellPath(p, cwd string) string {
 	return filepath.Join(cwd, p)
 }
 
+// expandHome replaces a leading "~" or "~/" with the home directory; ok=false
+// when p has one and the home directory is unknown.
+func expandHome(p string) (string, bool) {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p, true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p, false
+	}
+	return home + p[1:], true
+}
+
+// searchPath resolves the path a Grep/Glob call names the way the shell hook
+// resolves a path word: ~ is the home directory, a Git Bash /c/… path is a
+// drive path on Windows, a relative path is taken from cwd. "" when it cannot
+// be resolved.
+func searchPath(p, cwd string) string {
+	p, ok := expandHome(p)
+	if !ok {
+		return ""
+	}
+	return shellPath(p, cwd)
+}
+
 // gitBashPath maps a Git Bash drive path (/c/Users/…) to its Windows form
 // (C:/Users/…); any other path is returned as is.
 func gitBashPath(p string) string {
@@ -378,10 +502,10 @@ func wordOf(w *syntax.Word) shellWord {
 		switch p := part.(type) {
 		case *syntax.Lit:
 			v := unescape(p.Value, false) // before ~ expansion: a Windows home has backslashes
-			if i == 0 && (p.Value == "~" || strings.HasPrefix(p.Value, "~/")) {
-				home, err := os.UserHomeDir()
-				out.dyn = out.dyn || err != nil
-				v = home + v[1:]
+			if i == 0 && strings.HasPrefix(p.Value, "~") {
+				var ok bool
+				v, ok = expandHome(v)
+				out.dyn = out.dyn || !ok
 			}
 			out.glob = out.glob || strings.ContainsAny(p.Value, "*?[")
 			b.WriteString(v)
