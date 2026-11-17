@@ -45,14 +45,14 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 // syncPullBudget / syncPushBudget bound the best-effort HTTP memory-sync pull
 // (session-start, before recall) and push (Stop). Sync payloads are small
 // text-only memory rows (never the code graph), so these are short; a wedged
-// or unreachable sync server must never delay the agent. Vars so tests can shrink them.
+// or unreachable sync server must never delay the agent. Vars so tests can
+// shrink them.
 var syncPullBudget = 5 * time.Second
 var syncPushBudget = 5 * time.Second
 
 // boundedSync runs fn (a Syncer.Pull or Syncer.Push call) with a hard
-// deadline: abandoning a slow
-// or unreachable server is safe because sync is best-effort and additive —
-// nothing local depends on it completing.
+// deadline: abandoning a slow or unreachable server is safe because sync is
+// best-effort and additive — nothing local depends on it completing.
 func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Context) error) {
 	sctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -145,9 +145,9 @@ func conversation(ev Event) string {
 	return "session:" + ev.SessionID + "/agent:" + ev.AgentID
 }
 
-// handleSessionStart opens/creates the session row, runs
-// gated compaction, recalls a token-budgeted slice for this branch, and returns it
-// as injectable context plus a record nudge. A resume of a conversation that
+// handleSessionStart opens/creates the session row, runs gated compaction,
+// recalls a token-budgeted slice for this branch, and returns it as injectable
+// context plus a record nudge. A resume of a conversation that
 // already got the block returns only the memories it has not been shown yet.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
