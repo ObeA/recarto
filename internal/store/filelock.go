@@ -8,7 +8,7 @@ import (
 )
 
 // tryLockFile is lockFile without the wait.
-func tryLockFile(f *os.File) (bool, error) { return lockFile(f, false) }
+func tryLockFile(f *os.File) (bool, error) { return lockFile(f, false, false) }
 
 func openLockFile(path string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -31,7 +31,7 @@ func LockFile(ctx context.Context, path string, waiting func()) (release func(),
 	}
 	// Closing only drops the lock, so a close error loses nothing.
 	unlock := func() { _ = f.Close() }
-	ok, err := lockFile(f, false)
+	ok, err := lockFile(f, false, false)
 	if err != nil {
 		unlock()
 		return nil, err
@@ -48,7 +48,7 @@ func LockFile(ctx context.Context, path string, waiting func()) (release func(),
 	}
 	got := make(chan result, 1)
 	go func() {
-		ok, err := lockFile(f, true)
+		ok, err := lockFile(f, true, false)
 		got <- result{ok, err}
 	}()
 	select {
@@ -76,7 +76,25 @@ func TryLockFile(path string) (release func(), ok bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	ok, err = lockFile(f, false)
+	ok, err = lockFile(f, false, false)
+	if err != nil || !ok {
+		// Nothing is held, so a close error loses nothing.
+		_ = f.Close()
+		return nil, false, err
+	}
+	return func() { _ = f.Close() }, true, nil
+}
+
+// TryShareLockFile takes a shared lock on the existing file at path without
+// waiting. Any number of holders share it; ok is false, with nothing held,
+// while an exclusive holder (LockFile, TryLockFile) has it. Unlike them it
+// never creates the file: a missing file fails with fs.ErrNotExist.
+func TryShareLockFile(path string) (release func(), ok bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	ok, err = lockFile(f, false, true)
 	if err != nil || !ok {
 		// Nothing is held, so a close error loses nothing.
 		_ = f.Close()

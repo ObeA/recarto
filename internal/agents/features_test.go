@@ -206,7 +206,7 @@ func TestReadAndEditHintsFollowFeatures(t *testing.T) {
 		}
 		return strings.Join(out, "\n")
 	}
-	if got := read("all", nil); !strings.Contains(got, bug) || !strings.Contains(got, "get_memory id=") || !strings.Contains(got, guidance) ||
+	if got := read("all", nil); !strings.Contains(got, bug) || !strings.Contains(got, "`get_memory`, id=") || !strings.Contains(got, guidance) ||
 		!strings.Contains(got, todo) || !strings.Contains(got, large) || !strings.Contains(got, repeat) {
 		t.Fatalf("all features on, missing a hint:\n%s", got)
 	}
@@ -255,7 +255,7 @@ func TestSearchHintsFollowFeatures(t *testing.T) {
 		return res.Context
 	}
 	if got := grep("on", nil); !strings.Contains(got, "widget.go:3") || !strings.Contains(got, "get_code_snippet") ||
-		!strings.Contains(got, "Known bugs in this code (search_bugs for detail):\n- ⚠ Widget overflow") {
+		!strings.Contains(got, "Known bugs in this code (recarto MCP tool `search_bugs` for detail):\n- ⚠ Widget overflow") {
 		t.Fatalf("all on:\n%s", got)
 	}
 	if got := grep("off", off(features.SearchHints)); got != "" {
@@ -309,7 +309,7 @@ func TestStopFollowsFeatures(t *testing.T) {
 		t.Errorf("issue-reports off, reminder: %q", res.SystemMessage)
 	}
 	if res := stop(off(features.IssueReports), 3); !res.Block || strings.Contains(res.Reason, "report_recarto_issue") ||
-		!strings.HasSuffix(res.Reason, "(record_memory / record_bug). Or finish if there's genuinely nothing to keep.") {
+		!strings.HasSuffix(res.Reason, "with the recarto MCP tools `record_memory` and `record_bug`. Or finish if there's genuinely nothing to keep.") {
 		t.Errorf("issue-reports off, nudge: %q", res.Reason)
 	}
 	if res := stop(off(features.MemoryTools), 3); res != (Result{}) {

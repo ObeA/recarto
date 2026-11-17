@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -147,6 +148,22 @@ const (
 // blockMetric marks a conversation that got the full session-start block.
 const blockMetric = "session_block"
 
+// toolFeatures returns a's features as a hook applies them to its pointers at
+// MCP tools. While no Recarto MCP server runs for the repo (app.ServerRunning)
+// the agent cannot call those tools, so the features that register them count
+// as off: a hook keeps its facts and leaves out what points at a tool.
+func toolFeatures(a *app.App) features.Set {
+	if app.ServerRunning(a.Git.RepoID) {
+		return a.Features
+	}
+	f := features.Set{}
+	maps.Copy(f, a.Features)
+	f[features.MemoryTools] = false
+	f[features.GraphTools] = false
+	f[features.IssueReports] = false
+	return f
+}
+
 // conversation returns the ledger scope of what ev's conversation was shown:
 // the session's main agent, or the subagent ev names. "" without a session.
 func conversation(ev Event) string {
@@ -269,7 +286,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	for _, rc := range a.Repos {
 		extraRepos = append(extraRepos, rc.Git.RepoName)
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, indexing, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, indexing, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
 	// Mark every memory rendered into this block as surfaced for the conversation, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -473,7 +490,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// A read starting past line 1 asked for a range, whatever the host reported.
 	ranged := ev.ReadRanged || first > 1
 	if scope != "" && tokens >= int64(largeReadThreshold()) &&
-		a.Features.On(features.LargeReads) && a.Features.On(features.GraphTools) {
+		a.Features.On(features.LargeReads) && toolFeatures(a).On(features.GraphTools) {
 		// The Get only skips work once the session's nudge is given; Claim decides.
 		nudged, err := a.Ledger.Get(ctx, scope, "large_read_nudged")
 		if err != nil {
@@ -489,9 +506,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 				}
 				if won {
 					_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
-					msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens read, %d symbols indexed). "+
-						"For large indexed files, use get_file_outline for the structure or get_code_snippet to read one symbol, "+
-						"instead of reading the whole file.", rel, tokens, len(syms)))
+					msgs = append(msgs, fmt.Sprintf(largeReadNudge, rel, tokens, len(syms)))
 				}
 			}
 		}
@@ -511,7 +526,7 @@ func anchoredNotes(ctx context.Context, a *app.App, scope string, target *app.Re
 	if a.Features.On(features.BugWarnings) {
 		if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
 			if found = dedupSurfaced(ctx, a, scope, found); len(found) > 0 {
-				msgs = append(msgs, formatBugWarnings(rel, found, a.Features.On(features.MemoryTools)))
+				msgs = append(msgs, formatBugWarnings(rel, found, toolFeatures(a).On(features.MemoryTools)))
 			}
 		}
 	}
@@ -584,9 +599,15 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 
 // shellSearchNudge points the agent at the MCP tools that beat a shell search.
 // It rides along with a session's first shell search only.
-const shellSearchNudge = "Recarto: next time, search with its MCP tools instead of the shell — search_content " +
+const shellSearchNudge = "Recarto: next time, search with the recarto MCP tools instead of the shell: `search_content` " +
 	"(regex/text search of the worktree that honours .gitignore and names each hit's enclosing symbol) " +
-	"and search_graph (symbol and concept search)."
+	"and `search_graph` (symbol and concept search)."
+
+// largeReadNudge points a session's first large whole-file read at the
+// cheaper views of an indexed file.
+const largeReadNudge = "Recarto: %s is large (~%d tokens read, %d symbols indexed). " +
+	"For large indexed files, use the recarto MCP tools `get_file_outline` for the structure or `get_code_snippet` to read one symbol, " +
+	"instead of reading the whole file."
 
 // handleShell answers a shell tool call RunHook read as searches and file
 // views. The line's searches share one search hint, capped like a Grep/Glob
@@ -610,7 +631,7 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			msgs = append(msgs, hint)
 		}
 	}
-	if len(ev.Patterns) > 0 && len(repos) > 0 && scope != "" && a.Features.On(features.GraphTools) {
+	if len(ev.Patterns) > 0 && len(repos) > 0 && scope != "" && toolFeatures(a).On(features.GraphTools) {
 		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
 			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)
 			msgs = append(msgs, shellSearchNudge)
@@ -648,10 +669,10 @@ const stopNudgeEditThreshold = 3
 // fallback (low-edit sessions, memories already recorded, or any fault in the
 // nudge decision). Conversation-heavy low-edit sessions are exactly where
 // preference corrections surface, so it must not disappear with the nudge.
-const stopCaptureReminder = "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice."
+const stopCaptureReminder = "recarto: before ending, record any new learnings, bug fixes and preferences with the recarto MCP tools `record_memory` and `record_bug` — e.g. if the user corrected your approach or stated a style/workflow choice."
 
 // stopIssueReminder follows stopCaptureReminder while issue reports are on.
-const stopIssueReminder = " And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."
+const stopIssueReminder = " And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call the recarto MCP tool `report_recarto_issue` so it can be fixed."
 
 // handleStop closes the session row and, at most once per session, blocks the
 // stop with a capture nudge when the session edited code but recorded nothing.
@@ -692,14 +713,19 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
 	}
-	// Without the memory tools there is nothing to remind the agent to call.
-	if ev.StopActive || !a.Features.On(features.MemoryTools) {
+	if ev.StopActive {
+		return Result{}, nil
+	}
+	// Without the memory tools, or without a server to call them on, there is
+	// nothing to remind the agent to call.
+	f := toolFeatures(a)
+	if !f.On(features.MemoryTools) {
 		return Result{}, nil
 	}
 	reminder := ""
 	if a.Features.On(features.StopReminder) {
 		reminder = stopCaptureReminder
-		if a.Features.On(features.IssueReports) {
+		if f.On(features.IssueReports) {
 			reminder += stopIssueReminder
 		}
 	}
@@ -754,9 +780,9 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		}
 	}
 	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
-	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now (record_memory / record_bug)", edits)
-	if a.Features.On(features.IssueReports) {
-		reason += " — and report_recarto_issue if Recarto itself misbehaved"
+	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now with the recarto MCP tools `record_memory` and `record_bug`", edits)
+	if f.On(features.IssueReports) {
+		reason += " — and `report_recarto_issue` if Recarto itself misbehaved"
 	}
 	return Result{Block: true, Reason: reason + ". Or finish if there's genuinely nothing to keep."}, nil
 }

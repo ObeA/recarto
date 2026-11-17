@@ -183,7 +183,7 @@ What each agent gets:
 | **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` / `~/.config/opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
 | **Copilot CLI** | `.mcp.json` / `~/.copilot/mcp-config.json` | `.github/hooks/recarto.json` / `~/.copilot/hooks/recarto.json` | `AGENTS.md` / `~/.copilot/copilot-instructions.md` |
 
-The instructions are a short block of rules between `<!-- recarto:begin -->` and `<!-- recarto:end -->`: what to record and recall, and which Recarto tool to use instead of reading whole files or grepping. How to use each tool is in the tool's own description. Re-running `recarto init` replaces the block, also one written by an older version, and leaves the rest of the file as it is.
+The instructions are a short block of rules between `<!-- recarto:begin -->` and `<!-- recarto:end -->`: what to record and recall, and which Recarto tool to use instead of reading whole files or grepping. How to use each tool is in the tool's own description. The block names them as tools of the `recarto` MCP server and tells the agent to load them by that name when its host loads tools on demand. Re-running `recarto init` replaces the block, also one written by an older version, and leaves the rest of the file as it is.
 
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
@@ -277,9 +277,9 @@ number by `recarto config` and `recarto doctor`; hooks skip the bad line.
 After a file read (Claude Code's `Read`, OpenCode's `read`, Copilot's `view`), Recarto adds the file's anchored notes and at most two notices:
 
 - **Repeat read** (`repeated-reads`). Added when every line the read returned came back in earlier reads of the same file in this conversation, and the file has not changed since. It names the lines when the read returned only part of the file. Once a file changes, reads of its old content no longer count. A read whose lines Recarto can't tell gets no notice. That includes Claude Code's own "file unchanged" reply when the agent repeats its last read.
-- **Large file** (`large-reads`). Added once per conversation, on the first whole-file read of a file with indexed symbols that returns at least 2,000 estimated tokens (`RECARTO_LARGE_READ_TOKENS`). It points to `get_file_outline` and `get_code_snippet`. A read is whole-file when it asked for no line range, even if the host cut the output short, or when the lines it returned cover the whole file. A read of part of a file never gets it.
+- **Large file** (`large-reads`). Added once per conversation, on the first whole-file read of a file with indexed symbols that returns at least 2,000 estimated tokens (`RECARTO_LARGE_READ_TOKENS`). It points to `get_file_outline` and `get_code_snippet`, while a Recarto MCP server runs for the repo (see [Tool pointers](#tool-pointers)). A read is whole-file when it asked for no line range, even if the host cut the output short, or when the lines it returned cover the whole file. A read of part of a file never gets it.
 
-On a read, an edit or a shell view, a bug note shows the title, the first 200 characters of the fix and, with `memory-tools` on, the `get_memory` call that returns the whole text. Titles longer than 160 characters are cut in these notes, in the session-start memory list and in its list of recent bugs.
+On a read, an edit or a shell view, a bug note shows the title, the first 200 characters of the fix and, with `memory-tools` on and a Recarto MCP server running for the repo, the `get_memory` call that returns the whole text. Titles longer than 160 characters are cut in these notes, in the session-start memory list and in its list of recent bugs.
 
 `recarto status` counts the notices added under `repeated_reads_blocked` and `large_reads_nudged`. On OpenCode, re-run `recarto init` after upgrading so the plugin passes the read's line range.
 
@@ -301,6 +301,12 @@ What session start adds, by its `source`:
 | `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
 
 Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. It then starts `recarto warm` in the background, which brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. The hook does not wait for it. While the worktree's index is unfinished, the block has one line saying so instead of the code map. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
+
+## Tool pointers
+
+Hooks name each tool they point at as a recarto MCP tool. They point at a tool only while a `recarto serve` runs on this machine for the repo: started in any of its worktrees, or serving the repo through `RECARTO_REPOS`. Without one, hints and notes keep their symbols, bugs and notes and leave out the pointer, and the large-file, shell-search and Stop nudges and the Stop reminder are skipped and not counted as given. A server that exits or crashes stops counting once its process has ended.
+
+`recarto serve` also returns a short usage text in its `initialize` reply, naming only the tools that are on.
 
 ## Search hints
 
@@ -348,7 +354,7 @@ How it reads them:
   - A file outside every served repo surfaces nothing.
 - **One hint per line.** The searches of one command line share one hint and its 800-character cap. The shell-search nudge and the notes of printed files come on top.
 - **Nudge.** A conversation's first shell search also points the agent at `search_content`
-  and `search_graph`, once per conversation.
+  and `search_graph`, once per conversation, while a Recarto MCP server runs for the repo.
 - **Dedup** works as for the tools. A pattern searched again, by the shell or by
   Grep/Glob, adds nothing. A memory already shown at
   session start, by a Read or by an earlier view is not shown again in the same conversation.

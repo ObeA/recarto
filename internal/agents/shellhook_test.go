@@ -34,6 +34,14 @@ func (contextAdapter) Encode(_ EventKind, out io.Writer, res Result) error {
 // shell parser finds its files on disk.
 func newTreeApp(t *testing.T) (*app.App, string) {
 	t.Helper()
+	a, dir := newUnservedTreeApp(t)
+	markServing(t, a)
+	return a, dir
+}
+
+// newUnservedTreeApp is newTreeApp with no Recarto MCP server marked running.
+func newUnservedTreeApp(t *testing.T) (*app.App, string) {
+	t.Helper()
 	dir := shellTree(t)
 	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())

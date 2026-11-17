@@ -121,7 +121,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
 		}
 		if f.On(features.GraphTools) {
-			b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
+			b.WriteString("Query the code graph with the recarto MCP tools (search, snippet, callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
 		}
 	}
 
@@ -132,7 +132,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	if len(bugs) > 0 {
 		b.WriteString("\nRecent bugs")
 		if f.On(features.MemoryTools) {
-			b.WriteString(" (search_bugs for detail)")
+			b.WriteString(" (recarto MCP tool `search_bugs` for detail)")
 		}
 		b.WriteString(":\n")
 		for _, r := range bugs {
@@ -144,7 +144,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	}
 
 	if memories && f.On(features.MemoryTools) {
-		b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
+		b.WriteString("\nRecord new learnings with the recarto MCP tool `record_memory` and bug fixes with `record_bug`.")
 	}
 	return strings.TrimSpace(b.String()), emitted
 }
@@ -251,7 +251,7 @@ func formatBugWarnings(loc string, bugs []*memory.Record, pointer bool) string {
 			line += " — fix: " + clip(fix, fixMax)
 		}
 		if pointer {
-			line += fmt.Sprintf(" (full text: get_memory id=%s)", r.ID)
+			line += fmt.Sprintf(" (full text: recarto MCP tool `get_memory`, id=%s)", r.ID)
 		}
 		lines = append(lines, line)
 	}
@@ -418,7 +418,7 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 			b.WriteString(line + "\n")
 		}
 		if pointer {
-			fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
+			fmt.Fprintf(&b, "(the recarto MCP tool `get_graph_delta` lists all %d)\n", total)
 		}
 		return b.String()
 	}
@@ -442,7 +442,7 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 		out = fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n",
 			date, total)
 		if pointer {
-			out += "(get_graph_delta lists them)\n"
+			out += "(the recarto MCP tool `get_graph_delta` lists them)\n"
 		}
 	}
 	return out

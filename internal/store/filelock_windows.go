@@ -9,13 +9,18 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// lockFile takes an exclusive lock on f, waiting for it when wait is set and
-// otherwise reporting false when another handle holds it. Closing f or exiting
+// lockFile takes an exclusive lock on f, or a shared one when shared is set;
+// shared holders coexist, and any holder excludes an exclusive lock. It waits
+// for the lock when wait is set and otherwise reports false when another
+// handle holds it. Closing f or exiting
 // releases it. The locked byte sits at 4 GiB, past the content: Windows locks
 // are mandatory, and the trace must stay readable by processes that do not
 // hold the lock.
-func lockFile(f *os.File, wait bool) (bool, error) {
-	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK)
+func lockFile(f *os.File, wait, shared bool) (bool, error) {
+	var flags uint32
+	if !shared {
+		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
+	}
 	if !wait {
 		flags |= windows.LOCKFILE_FAIL_IMMEDIATELY
 	}

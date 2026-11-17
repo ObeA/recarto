@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -101,6 +102,9 @@ func assertDescribeMatches(t *testing.T, cfg Config, a *App) {
 	}
 	if sv.Repos != (len(a.Repos) > 0) || sv.Workspace != (a.Workspace != nil) {
 		t.Errorf("Describe = %+v, want Repos=%v Workspace=%v as opened", sv, len(a.Repos) > 0, a.Workspace != nil)
+	}
+	if !slices.Equal(sv.RepoIDs, a.Served().RepoIDs) {
+		t.Errorf("Describe repo ids = %v, opened = %v", sv.RepoIDs, a.Served().RepoIDs)
 	}
 }
 

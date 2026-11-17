@@ -276,3 +276,38 @@ func TestServeRepairsADamagedStoreBeforeTheFirstToolCall(t *testing.T) {
 		})
 	}
 }
+
+// serve marks every repo it serves running for the hooks, a RECARTO_REPOS
+// extra included, from before the handshake until it ends.
+func TestServeMarksEveryServedRepo(t *testing.T) {
+	clearRecartoEnv(t)
+	cfg := serveCfg(t, t.TempDir(), false)
+	extra := t.TempDir()
+	initGitRepo(t, extra, "Extra")
+	t.Setenv("RECARTO_REPOS", extra)
+	hooked, err := app.Open(app.Config{CWD: extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extraID := hooked.Git.RepoID
+	if err := hooked.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sv, err := app.Describe(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{sv.RepoIDs[0], extraID}
+	running := func() []bool { return []bool{app.ServerRunning(ids[0]), app.ServerRunning(ids[1])} }
+	if got := running(); got[0] || got[1] {
+		t.Fatalf("running before serve: %v", got)
+	}
+	_, wait := startServe(t, cfg, realOpen(cfg))
+	if got := running(); !got[0] || !got[1] {
+		t.Errorf("running while serving (primary, extra) = %v, want both", got)
+	}
+	wantServeClosed(t, wait())
+	if got := running(); got[0] || got[1] {
+		t.Errorf("running after serve ended: %v", got)
+	}
+}
