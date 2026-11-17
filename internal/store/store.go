@@ -361,15 +361,38 @@ func (s *Store) Path() string { return s.path }
 // Checkpoint flushes the WAL into the main database file and truncates the WAL,
 // bounding on-disk growth during a long sequence of writes (e.g. a full graph
 // index, where the WAL would otherwise accumulate every inserted row until the
-// next passive auto-checkpoint). PRAGMA wal_checkpoint returns a status row
-// (busy, log frames, checkpointed frames); a non-zero busy is not an error — it
-// just means a reader held the WAL and the truncation will happen on a later
-// call — so only a genuine statement failure is surfaced.
+// next passive auto-checkpoint).
+//
+// It never waits for another connection. A TRUNCATE checkpoint has to wait for
+// every reader of an older snapshot and holds off new writers while it waits,
+// so behind one long read the 5 s busy timeout stalled each caller and every
+// writer queued after it. It runs with no busy timeout instead: it copies what
+// it can and, while a reader or writer is active, leaves the truncation to a
+// later call. PRAGMA wal_checkpoint reports that as busy=1 in its status row,
+// not as an error, so only a genuine failure is returned.
 func (s *Store) Checkpoint(ctx context.Context) error {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	// Close only hands the connection back to the pool; there is nothing to undo.
+	defer func() { _ = conn.Close() }()
+	var prior int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prior); err != nil {
+		return err
+	}
+	defer func() {
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA busy_timeout=%d`, prior)); err != nil {
+			// A connection left without a busy timeout would fail every later
+			// writer at once instead of waiting; drop it from the pool.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
+		return err
+	}
 	var busy, logFrames, checkpointed int
-	err := s.DB.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).
-		Scan(&busy, &logFrames, &checkpointed)
-	return err
+	return conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
 }
 
 // maxWriteRetries bounds how many extra times WriteTx restarts a transaction

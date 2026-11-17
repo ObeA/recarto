@@ -399,7 +399,10 @@ func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*
 // concurrency (the store serializes writers; the UPSERT is atomic). Every open
 // runs it, so it first reads the rows and writes only on drift: an unchanged
 // store is then opened without taking the write lock — and a hook that only
-// reads never makes SQLite fsync and checkpoint the WAL on close.
+// reads never makes SQLite fsync and checkpoint the WAL on close. repo_name is
+// the opening worktree's directory name, which differs between the worktrees
+// sharing this store, so any stored name counts as current; it is rewritten
+// with the other rows on a real identity change (a first open, a new version).
 func (a *App) writeMeta(ctx context.Context) error {
 	want := map[string]string{
 		"repo_name":       a.Git.RepoName,
@@ -412,7 +415,7 @@ func (a *App) writeMeta(ctx context.Context) error {
 		same := 0
 		for rows.Next() {
 			var k, v string
-			if rows.Scan(&k, &v) == nil && want[k] == v {
+			if rows.Scan(&k, &v) == nil && (want[k] == v || k == "repo_name") {
 				same++
 			}
 		}
