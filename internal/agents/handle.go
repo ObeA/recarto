@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,6 +23,9 @@ import (
 // neutral result. It is exit-0 advisory: callers treat any returned error as
 // non-blocking. RunHook always encodes the (possibly partial) Result first.
 func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
+	// Every hook that reaches the store counts as use of its worktree. A lost
+	// mark only lets the sweep drop this graph sooner; the next use re-indexes it.
+	_ = a.Graph.MarkUsed(ctx, a.Git.Worktree)
 	switch ev.Kind {
 	case KindSessionStart:
 		return handleSessionStart(ctx, a, ev)
@@ -39,24 +43,17 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	return Result{}, nil
 }
 
-// sessionStartIndexBudget bounds the synchronous graph warm-up inside the
-// session-start hook. Most repos index (or no-op) well inside it; a huge first
-// index makes bounded progress each session instead of blocking the host. A
-// var so tests can shrink it.
-var sessionStartIndexBudget = 15 * time.Second
-
 // syncPullBudget / syncPushBudget bound the best-effort HTTP memory-sync pull
 // (session-start, before recall) and push (Stop). Sync payloads are small
-// text-only memory rows (never the code graph), so these are much shorter
-// than the graph warm-up budget; a wedged or unreachable sync server must
-// never delay the agent. Vars so tests can shrink them.
+// text-only memory rows (never the code graph), so these are short; a wedged
+// or unreachable sync server must never delay the agent. Vars so tests can
+// shrink them.
 var syncPullBudget = 5 * time.Second
 var syncPushBudget = 5 * time.Second
 
 // boundedSync runs fn (a Syncer.Pull or Syncer.Push call) with a hard
-// deadline, exactly like the graph warm-up goroutine below: abandoning a slow
-// or unreachable server is safe because sync is best-effort and additive —
-// nothing local depends on it completing.
+// deadline: abandoning a slow or unreachable server is safe because sync is
+// best-effort and additive — nothing local depends on it completing.
 func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Context) error) {
 	sctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -77,10 +74,6 @@ func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Cont
 // any other best-effort failure, it just ends that goroutine's work.
 func recoverHook() { _ = recover() }
 
-// newGraphSource builds the file source for the session-start warm-up; a var so
-// tests can substitute a controllable source.
-var newGraphSource = graph.NewSource
-
 // agentOrDefault stamps an unknown/empty agent as the legacy Claude Code value so
 // the sessions.agent column always carries a host name.
 func agentOrDefault(s string) string {
@@ -90,14 +83,14 @@ func agentOrDefault(s string) string {
 	return s
 }
 
-// owningRepo maps an absolute file path to the served repo containing it —
+// owningRepo maps an absolute file path to the served repo among repos containing it —
 // the primary, or a RECARTO_REPOS extra — returning that repo's context and
 // the repo-relative path. Longest worktree prefix wins (a nested checkout
 // belongs to the inner repo). ok=false when no served worktree contains the
 // file, or the path is not absolute.
-func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok bool) {
+func owningRepo(repos []*app.RepoContext, abs string) (rc *app.RepoContext, rel string, ok bool) {
 	bestLen := -1
-	for _, cand := range a.AllRepos() {
+	for _, cand := range repos {
 		wt := cand.Git.Worktree
 		if r, in := within(wt, abs); in && len(wt) > bestLen {
 			rc, rel, ok, bestLen = cand, r, true, len(wt)
@@ -111,6 +104,20 @@ func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok boo
 func Owned(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
 		if _, in := within(wt, abs); in {
+			return true
+		}
+	}
+	return false
+}
+
+// Reaches reports whether a search over the absolute path abs reaches one of
+// the worktrees: abs lies in one or contains one. It is the store-free form of
+// searchRepos, against app.Worktrees: true exactly when searchRepos finds a repo.
+func Reaches(worktrees []string, abs string) bool {
+	for _, wt := range worktrees {
+		_, in := within(wt, abs)
+		_, contains := within(abs, wt)
+		if in || contains {
 			return true
 		}
 	}
@@ -141,6 +148,22 @@ const (
 // blockMetric marks a conversation that got the full session-start block.
 const blockMetric = "session_block"
 
+// toolFeatures returns a's features as a hook applies them to its pointers at
+// MCP tools. While no Recarto MCP server runs for the repo (app.ServerRunning)
+// the agent cannot call those tools, so the features that register them count
+// as off: a hook keeps its facts and leaves out what points at a tool.
+func toolFeatures(a *app.App) features.Set {
+	if app.ServerRunning(a.Git.RepoID) {
+		return a.Features
+	}
+	f := features.Set{}
+	maps.Copy(f, a.Features)
+	f[features.MemoryTools] = false
+	f[features.GraphTools] = false
+	f[features.IssueReports] = false
+	return f
+}
+
 // conversation returns the ledger scope of what ev's conversation was shown:
 // the session's main agent, or the subagent ev names. "" without a session.
 func conversation(ev Event) string {
@@ -153,9 +176,9 @@ func conversation(ev Event) string {
 	return "session:" + ev.SessionID + "/agent:" + ev.AgentID
 }
 
-// handleSessionStart opens/creates the session row, warms the code graph, runs
-// gated compaction, recalls a token-budgeted slice for this branch, and returns it
-// as injectable context plus a record nudge. A resume of a conversation that
+// handleSessionStart opens/creates the session row, runs gated compaction,
+// recalls a token-budgeted slice for this branch, and returns it as injectable
+// context plus a record nudge. A resume of a conversation that
 // already got the block returns only the memories it has not been shown yet.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
@@ -245,9 +268,14 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		return resumeContext(ctx, a, scope, results, wsName, wsResults, repoBudget)
 	}
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
+	// A map of an unfinished index leaves modules out without saying so, so
+	// while the index is unfinished the block says that instead.
 	var arch graph.Architecture
+	indexing := false
 	if a.Features.On(features.CodeMap) {
-		arch, _ = a.Graph.Architecture(ctx, a.Git.Worktree, "")
+		if m, done, err := a.Graph.CodeMap(ctx, a.Git.Worktree, a.Git.NonGit); err == nil {
+			arch, indexing = m, !done
+		}
 	}
 	var bugs []*memory.Record
 	if a.Features.On(features.RecentBugs) {
@@ -258,7 +286,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	for _, rc := range a.Repos {
 		extraRepos = append(extraRepos, rc.Git.RepoName)
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, indexing, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
 	// Mark every memory rendered into this block as surfaced for the conversation, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -288,47 +316,9 @@ func applySource(ctx context.Context, a *app.App, scope, source string) (resumed
 	return false, nil
 }
 
-// sessionStartUpkeep warms the code graph, syncs memories, imports the team
-// snapshot and runs gated memory compaction. Every session start runs it,
-// whatever its source.
+// sessionStartUpkeep syncs memories, imports the team snapshot and runs gated
+// memory compaction. Every session start runs it, whatever its source.
 func sessionStartUpkeep(ctx context.Context, a *app.App) {
-	// Warm the code graph for this worktree — best-effort and budget-bounded: a
-	// first index of a large repo would otherwise block the host's hook (and the
-	// user's first message) for minutes. The budget is HARD: the reconcile runs
-	// in a goroutine and is abandoned at the deadline, because parts of it
-	// (git ls-files, filesystem walks, a wedged mount) are not context-aware.
-	// Abandoning is safe — the hook is a one-shot process, committed batches
-	// survive, the crash-safe pending marker records an unfinished resolve, and
-	// a later reconcile (next session, or an MCP query's background refresh)
-	// finishes the job.
-	sctx, cancel := context.WithTimeout(ctx, sessionStartIndexBudget)
-	defer cancel()
-	warmed := make(chan struct{})
-	go func() {
-		defer close(warmed)
-		defer recoverHook()
-		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
-		// Extra served repos (RECARTO_REPOS) reconcile inside the same hard
-		// budget — usually a no-op, since sessions cd'd into those repos keep
-		// their graphs fresh; a cold host makes bounded progress per session.
-		for _, rc := range a.Repos {
-			_ = rc.Graph.ReconcileIfStale(sctx, rc.Git.Worktree, newGraphSource(rc.Git.Worktree), graph.WorktreeToken(rc.Git.Worktree))
-		}
-		// Opportunistic worktree GC, inside the same hard budget: a deleted git
-		// worktree leaves its entire graph copy in the shared store until swept.
-		// Batched deletes commit progress, so abandonment at the budget is safe.
-		if dead, err := a.DeadWorktrees(sctx); err == nil && len(dead) > 0 {
-			for _, wt := range dead {
-				_ = a.Graph.PruneWorktree(sctx, wt)
-			}
-			_ = a.Store.Checkpoint(sctx)
-		}
-	}()
-	select {
-	case <-warmed:
-	case <-sctx.Done():
-	}
-
 	// Pull remote memory changes before recall, so this session's injected
 	// context reflects other machines' work (best-effort, bounded — a wedged or
 	// unreachable sync server must never delay the agent). This runs BEFORE the
@@ -473,9 +463,10 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// sibling repo's file (a verifier in a scratch dir, RECARTO_REPOS) must
 	// surface THAT repo's anchored memories, with the path made relative to
 	// that repo's root so it matches how the anchors were recorded.
-	target, rel, owned := owningRepo(a, file)
+	all := a.AllRepos()
+	target, rel, owned := owningRepo(all, file)
 	if !owned {
-		target, rel = a.AllRepos()[0], memory.RelFileRef(a.Git.Worktree, file)
+		target, rel = all[0], memory.RelFileRef(a.Git.Worktree, file)
 	}
 
 	first, last := ev.ReadFirst, ev.ReadLast
@@ -499,7 +490,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// A read starting past line 1 asked for a range, whatever the host reported.
 	ranged := ev.ReadRanged || first > 1
 	if scope != "" && tokens >= int64(largeReadThreshold()) &&
-		a.Features.On(features.LargeReads) && a.Features.On(features.GraphTools) {
+		a.Features.On(features.LargeReads) && toolFeatures(a).On(features.GraphTools) {
 		// The Get only skips work once the session's nudge is given; Claim decides.
 		nudged, err := a.Ledger.Get(ctx, scope, "large_read_nudged")
 		if err != nil {
@@ -515,9 +506,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 				}
 				if won {
 					_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
-					msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens read, %d symbols indexed). "+
-						"For large indexed files, use get_file_outline for the structure or get_code_snippet to read one symbol, "+
-						"instead of reading the whole file.", rel, tokens, len(syms)))
+					msgs = append(msgs, fmt.Sprintf(largeReadNudge, rel, tokens, len(syms)))
 				}
 			}
 		}
@@ -537,7 +526,7 @@ func anchoredNotes(ctx context.Context, a *app.App, scope string, target *app.Re
 	if a.Features.On(features.BugWarnings) {
 		if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
 			if found = dedupSurfaced(ctx, a, scope, found); len(found) > 0 {
-				msgs = append(msgs, formatBugWarnings(rel, found, a.Features.On(features.MemoryTools)))
+				msgs = append(msgs, formatBugWarnings(rel, found, toolFeatures(a).On(features.MemoryTools)))
 			}
 		}
 	}
@@ -570,7 +559,7 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// RECARTO_REPOS extra) so its anchored memories fire and ITS graph is
 	// reindexed — with the path relative to that repo's root, matching how
 	// anchors and graph files are keyed.
-	target, rel, owned := owningRepo(a, abs)
+	target, rel, owned := owningRepo(a.AllRepos(), abs)
 	if !owned {
 		return Result{}, nil // outside every served worktree; ignore
 	}
@@ -599,34 +588,42 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 }
 
 // handleAugment answers a Grep/Glob call with the search hint for its pattern
-// (see searchHint).
+// over the served repos the call's path reaches (see searchHint).
 func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if ev.Pattern == "" || !a.Features.On(features.SearchHints) {
 		return Result{}, nil
 	}
-	hint, err := searchHint(ctx, a, conversation(ev), []string{ev.Pattern})
+	hint, err := searchHint(ctx, a, conversation(ev), searchRepos(a, ev.SearchPaths), []string{ev.Pattern})
 	return Result{Context: hint}, err
 }
 
 // shellSearchNudge points the agent at the MCP tools that beat a shell search.
 // It rides along with a session's first shell search only.
-const shellSearchNudge = "Recarto: next time, search with its MCP tools instead of the shell — search_content " +
+const shellSearchNudge = "Recarto: next time, search with the recarto MCP tools instead of the shell: `search_content` " +
 	"(regex/text search of the worktree that honours .gitignore and names each hit's enclosing symbol) " +
-	"and search_graph (symbol and concept search)."
+	"and `search_graph` (symbol and concept search)."
+
+// largeReadNudge points a session's first large whole-file read at the
+// cheaper views of an indexed file.
+const largeReadNudge = "Recarto: %s is large (~%d tokens read, %d symbols indexed). " +
+	"For large indexed files, use the recarto MCP tools `get_file_outline` for the structure or `get_code_snippet` to read one symbol, " +
+	"instead of reading the whole file."
 
 // handleShell answers a shell tool call RunHook read as searches and file
 // views. The line's searches share one search hint, capped like a Grep/Glob
 // call's, and the session's first shell search adds shellSearchNudge. Each printed file in
 // a served repo surfaces its anchored memories, deduped exactly like a Read —
-// without a Read's counters, repeat warning or large-file nudge.
+// without a Read's counters, repeat warning or large-file nudge. A search whose
+// paths all lie outside the served repos adds no hint and no nudge.
 func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if !a.Features.On(features.ShellHints) {
 		return Result{}, nil
 	}
 	var msgs []string
 	scope := conversation(ev)
+	repos := searchRepos(a, ev.SearchPaths)
 	if a.Features.On(features.SearchHints) {
-		hint, err := searchHint(ctx, a, scope, ev.Patterns)
+		hint, err := searchHint(ctx, a, scope, repos, ev.Patterns)
 		if err != nil {
 			return Result{}, err
 		}
@@ -634,14 +631,15 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			msgs = append(msgs, hint)
 		}
 	}
-	if len(ev.Patterns) > 0 && scope != "" && a.Features.On(features.GraphTools) {
+	if len(ev.Patterns) > 0 && len(repos) > 0 && scope != "" && toolFeatures(a).On(features.GraphTools) {
 		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
 			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)
 			msgs = append(msgs, shellSearchNudge)
 		}
 	}
+	all := a.AllRepos()
 	for _, f := range ev.Files {
-		if target, rel, ok := owningRepo(a, f); ok {
+		if target, rel, ok := owningRepo(all, f); ok {
 			msgs = append(msgs, anchoredNotes(ctx, a, scope, target, rel)...)
 		}
 	}
@@ -671,10 +669,10 @@ const stopNudgeEditThreshold = 3
 // fallback (low-edit sessions, memories already recorded, or any fault in the
 // nudge decision). Conversation-heavy low-edit sessions are exactly where
 // preference corrections surface, so it must not disappear with the nudge.
-const stopCaptureReminder = "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice."
+const stopCaptureReminder = "recarto: before ending, record any new learnings, bug fixes and preferences with the recarto MCP tools `record_memory` and `record_bug` — e.g. if the user corrected your approach or stated a style/workflow choice."
 
 // stopIssueReminder follows stopCaptureReminder while issue reports are on.
-const stopIssueReminder = " And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."
+const stopIssueReminder = " And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call the recarto MCP tool `report_recarto_issue` so it can be fixed."
 
 // handleStop closes the session row and, at most once per session, blocks the
 // stop with a capture nudge when the session edited code but recorded nothing.
@@ -715,14 +713,19 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
 	}
-	// Without the memory tools there is nothing to remind the agent to call.
-	if ev.StopActive || !a.Features.On(features.MemoryTools) {
+	if ev.StopActive {
+		return Result{}, nil
+	}
+	// Without the memory tools, or without a server to call them on, there is
+	// nothing to remind the agent to call.
+	f := toolFeatures(a)
+	if !f.On(features.MemoryTools) {
 		return Result{}, nil
 	}
 	reminder := ""
 	if a.Features.On(features.StopReminder) {
 		reminder = stopCaptureReminder
-		if a.Features.On(features.IssueReports) {
+		if f.On(features.IssueReports) {
 			reminder += stopIssueReminder
 		}
 	}
@@ -777,9 +780,9 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		}
 	}
 	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
-	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now (record_memory / record_bug)", edits)
-	if a.Features.On(features.IssueReports) {
-		reason += " — and report_recarto_issue if Recarto itself misbehaved"
+	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now with the recarto MCP tools `record_memory` and `record_bug`", edits)
+	if f.On(features.IssueReports) {
+		reason += " — and `report_recarto_issue` if Recarto itself misbehaved"
 	}
 	return Result{Block: true, Reason: reason + ". Or finish if there's genuinely nothing to keep."}, nil
 }

@@ -111,7 +111,14 @@ type SearchGraphOutput struct {
 
 // weakResultHint nudges the agent to use candidate_symbols when a concept query
 // found nothing and supplied none. No server-side model is involved.
-const weakResultHint = "No matches. Retry search_graph with candidate_symbols set to the identifier names you'd expect for this concept (e.g. AddressLookup, Geocode) — any form works (PascalCase, interface-prefixed, snake_case, or plain words)."
+const weakResultHint = "No matches. Retry the recarto MCP tool `search_graph` with candidate_symbols set to the identifier names you'd expect for this concept (e.g. AddressLookup, Geocode) — any form works (PascalCase, interface-prefixed, snake_case, or plain words)."
+
+// Hints trace_call_path returns when its trace alone may mislead.
+const (
+	typeTraceHint   = "%s is a type (%s); call traces follow methods, not the declaration. Use the recarto MCP tools find_implementations(%q) for implementers, find_references(%q) for references, or trace_call_path on a specific %s.<Method>."
+	noCallersHint   = "%s resolved but has no callers in the graph — it may be an entrypoint, or callers bind dynamically and weren't statically resolved. Use the recarto MCP tool find_references(%q) to find the references the call edges miss."
+	testCallersHint = "every caller found is test code — production may reach %s through a wrapper or sibling API the trace can't see. Use the recarto MCP tool find_references(%q) for non-test references."
+)
 
 // roundScore trims a relevance score to 4 decimal places for the wire. Scores are
 // an ordinal ranking hint, and the ranking is already fixed at full precision
@@ -241,12 +248,12 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 		switch {
 		case graph.IsTypeKind(root.Kind):
 			// Calls target a type's methods, not its declaration.
-			out.Hint = fmt.Sprintf("%s is a type (%s); call traces follow methods, not the declaration. Use find_implementations(%q) for implementers, find_references(%q) for references, or trace_call_path on a specific %s.<Method>.",
+			out.Hint = fmt.Sprintf(typeTraceHint,
 				root.Name, root.Kind, root.Name, root.Name, root.Name)
 		case dir == "callers":
 			// Resolved method with no callers: an entrypoint, or call sites bind
 			// dynamically/through an interface and weren't statically resolved.
-			out.Hint = fmt.Sprintf("%s resolved but has no callers in the graph — it may be an entrypoint, or callers bind dynamically and weren't statically resolved. Use find_references(%q) to find the references the call edges miss.",
+			out.Hint = fmt.Sprintf(noCallersHint,
 				root.Name, leafName(root.Name))
 		}
 	}
@@ -269,7 +276,7 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 		}
 		if anyCaller && allTest {
 			leaf := leafName(in.Symbol)
-			out.Hint = fmt.Sprintf("every caller found is test code — production may reach %s through a wrapper or sibling API the trace can't see. Use find_references(%q) for non-test references.", leaf, leaf)
+			out.Hint = fmt.Sprintf(testCallersHint, leaf, leaf)
 		}
 	}
 	out.Hint = joinHints(fresh, out.Hint)

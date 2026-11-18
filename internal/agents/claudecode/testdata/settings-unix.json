@@ -1,0 +1,118 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/recarto hook post-read --agent claude",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/recarto hook post-edit --agent claude",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/recarto hook augment --agent claude",
+            "type": "command"
+          }
+        ],
+        "matcher": "Grep|Glob"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd grep",
+            "if": "Bash(grep *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd egrep",
+            "if": "Bash(egrep *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd fgrep",
+            "if": "Bash(fgrep *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd rg",
+            "if": "Bash(rg *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd ugrep",
+            "if": "Bash(ugrep *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd git",
+            "if": "Bash(git grep *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd find",
+            "if": "Bash(find *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd bfs",
+            "if": "Bash(bfs *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd cat",
+            "if": "Bash(cat *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd head",
+            "if": "Bash(head *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd tail",
+            "if": "Bash(tail *)",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/recarto hook shell --agent claude --cmd sed",
+            "if": "Bash(sed *)",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/recarto hook session-start --agent claude",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/recarto hook stop --agent claude",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

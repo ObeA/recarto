@@ -16,13 +16,17 @@ func TestPostEditIndexesFile(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Edited(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Edited(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	payload := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
 	if err := PostEdit(context.Background(), a, strings.NewReader(payload), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	var n int
-	a.Store.DB.QueryRow(`SELECT COUNT(*) FROM nodes WHERE name='Edited'`).Scan(&n)
+	if err := a.Store.DB.QueryRow(`SELECT COUNT(*) FROM nodes WHERE name='Edited'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if n != 1 {
 		t.Errorf("Edited node count = %d, want 1 (file not indexed)", n)
 	}
@@ -32,9 +36,13 @@ func TestAugmentInjectsSearchContext(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pe := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
-	PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{})
+	if err := PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
 	aug := `{"session_id":"s1","tool_input":{"pattern":"Authenticate"}}`
@@ -55,9 +63,13 @@ func TestAugmentSkipsFileGlobNoise(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc cs(){}\nfunc Processor(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc cs(){}\nfunc Processor(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pe := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
-	PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{})
+	if err := PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 
 	var globOut bytes.Buffer
 	glob := `{"session_id":"s1","tool_input":{"pattern":"*.cs"}}`
@@ -83,7 +95,9 @@ func TestPostEditSurfacesBugForEditedFile(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc F(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc F(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "edge case in F", Body: "edge case in F — fix: clamp",
@@ -106,9 +120,13 @@ func TestAugmentSurfacesBugsOfNamedSymbol(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
-	PostEdit(ctx, a, strings.NewReader(`{"session_id":"s1","tool_input":{"file_path":"`+filepath.Join(wt, "a.go")+`"}}`), &bytes.Buffer{})
+	if err := PostEdit(ctx, a, strings.NewReader(`{"session_id":"s1","tool_input":{"file_path":"`+filepath.Join(wt, "a.go")+`"}}`), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Authenticate bypass", Body: "Authenticate bypass when token empty — fix: reject",
 		Refs:   []memory.Ref{{Type: memory.RefSymbol, Value: "Authenticate"}},
@@ -134,6 +152,7 @@ func TestAugmentSurfacesBugsOfNamedSymbol(t *testing.T) {
 // first-search nudge as PostToolUse context.
 func TestShellSearchThroughClaudePayload(t *testing.T) {
 	a := newTestApp(t, "main")
+	a.Git.Worktree = t.TempDir() // the search's "." must lie in it on every OS
 	ctx := context.Background()
 	src := []byte("package p\nfunc handleAugment(){}\nfunc handleAugmentHelper(){}\n")
 	if err := a.Graph.IndexFile(ctx, a.Git.Worktree, "h.go", src, 1, int64(len(src))); err != nil {
@@ -146,7 +165,8 @@ func TestShellSearchThroughClaudePayload(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	in := `{"session_id":"s1","cwd":"/repo","hook_event_name":"PostToolUse","tool_name":"Bash",` +
+	cwd, _ := json.Marshal(a.Git.Worktree)
+	in := `{"session_id":"s1","cwd":` + string(cwd) + `,"hook_event_name":"PostToolUse","tool_name":"Bash",` +
 		`"tool_input":{"command":"grep -rn \"handleAugment\" .","description":"search"},` +
 		`"tool_response":{"stdout":"","stderr":"","interrupted":false}}`
 	var out bytes.Buffer
@@ -164,5 +184,36 @@ func TestShellSearchThroughClaudePayload(t *testing.T) {
 	if h.HookEventName != "PostToolUse" || !strings.Contains(c, "handleAugment  h.go:") || !strings.Contains(c, "Widget overflow") ||
 		!strings.Contains(c, "search_content") || strings.Contains(c, "handleAugmentHelper") || strings.Contains(c, "clamp") {
 		t.Errorf("got %+v", h)
+	}
+}
+
+// A Grep aimed outside the served repo gets no hint and leaves the pattern
+// unhinted; the same Grep without a path gets it.
+func TestAugmentHonoursGrepPath(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	ctx := context.Background()
+	src := []byte("package p\nfunc Serve(){}\n")
+	if err := a.Graph.IndexFile(ctx, wt, "s.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	grep := func(input map[string]string) string {
+		t.Helper()
+		in, err := json.Marshal(map[string]any{"session_id": "s1", "cwd": wt, "tool_input": input})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := Augment(ctx, a, bytes.NewReader(in), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if got := grep(map[string]string{"pattern": "Serve", "path": t.TempDir()}); got != "" {
+		t.Errorf("Grep outside the repo injected %q", got)
+	}
+	if got := grep(map[string]string{"pattern": "Serve"}); !strings.Contains(got, "Serve  s.go:2") {
+		t.Errorf("Grep without a path: %q", got)
 	}
 }

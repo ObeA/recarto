@@ -35,14 +35,17 @@ type Event struct {
 	// AgentID names the conversation within the session the hook fired in when
 	// the host runs several under one session id (a Claude Code subagent's
 	// agent_id); "" for the session's main conversation.
-	AgentID    string
-	Source     string
-	FilePath   string // absolute path (PostRead/PostEdit)
-	Pattern    string // grep/glob query (Augment)
+	AgentID  string
+	Source   string
+	FilePath string // absolute path (PostRead/PostEdit)
+	Pattern  string // grep/glob query (Augment)
+	// Path is the path a Grep/Glob call searches, as the tool got it; "" when
+	// the call names none (Augment).
+	Path       string
 	ToolResult string // raw tool result text (PostRead token estimate)
 	StopActive bool
 	Command    string // shell command line (Shell)
-	CWD        string // the shell's working directory (Shell)
+	CWD        string // the directory a relative Path or shell path resolves against (Augment, Shell)
 	// Trigger is the ShellCommands key a per-command host hook was started for
 	// ("" when the host starts one hook for every shell call). Only the hook of
 	// the line's first such command acts, so a line matching several starts
@@ -52,6 +55,10 @@ type Event struct {
 	// and the absolute paths of the files it prints (Shell).
 	Patterns []string
 	Files    []string
+	// SearchPaths are the absolute paths the searches name, as RunHook read them
+	// from Path (Augment) or Command (Shell). nil when a search names none, or one
+	// RunHook cannot resolve: the hint then covers every served repo.
+	SearchPaths []string
 	// ReadRanged reports that the agent asked a read for a line range.
 	// ReadFirst..ReadLast are the 1-based lines the read returned; both are 0
 	// when the host did not say (PostRead).
@@ -97,7 +104,8 @@ func KindFromString(s string) (EventKind, error) {
 }
 
 // RunHook decodes the event with ad, runs the shared Handle against the App
-// open returns, then encodes the result back through ad. Hooks fail open: an
+// open returns, then encodes the result back through ad. It reads a shell
+// command line and resolves a Grep/Glob call's path first. Hooks fail open: an
 // open or Handle error returns before any output — even advisory context built
 // before a failing side effect is dropped — for the (non-blocking) caller to
 // log. open is called only for an event with something to act on: an idle one,
@@ -111,7 +119,12 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 	}
 	if ev.Kind == KindShell {
 		if p := parseShell(ev.Command, ev.CWD); ev.Trigger == "" || ev.Trigger == p.owner {
-			ev.Patterns, ev.Files = p.patterns, p.files
+			ev.Patterns, ev.Files, ev.SearchPaths = p.patterns, p.files, p.paths
+		}
+	}
+	if ev.Kind == KindAugment && ev.Path != "" {
+		if p := searchPath(ev.Path, ev.CWD); p != "" {
+			ev.SearchPaths = []string{p}
 		}
 	}
 	if idle(ev) || !wanted(ev, features.Load()) {

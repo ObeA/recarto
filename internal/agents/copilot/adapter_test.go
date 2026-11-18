@@ -21,13 +21,13 @@ func TestDecodePostToolUseRoutesAndExtractsPath(t *testing.T) {
 }
 
 func TestDecodeAugmentPattern(t *testing.T) {
-	in := strings.NewReader(`{"sessionId":"s","toolName":"grep","toolArgs":{"pattern":"foo"}}`)
+	in := strings.NewReader(`{"sessionId":"s","cwd":"/r","toolName":"grep","toolArgs":{"pattern":"foo","path":"src"}}`)
 	ev, err := Adapter{}.Decode(agents.KindAugment, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.Pattern != "foo" {
-		t.Errorf("pattern = %q", ev.Pattern)
+	if ev.Pattern != "foo" || ev.Path != "src" || ev.CWD != "/r" {
+		t.Errorf("pattern = %q, path = %q, cwd = %q", ev.Pattern, ev.Path, ev.CWD)
 	}
 }
 

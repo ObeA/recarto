@@ -38,7 +38,8 @@ type Store struct {
 
 // openConfig holds Open's optional behaviour.
 type openConfig struct {
-	quickCheck bool
+	// quickCheck enables the proactive check when non-nil and bounds it.
+	quickCheck context.Context
 }
 
 // Option customises Open.
@@ -47,19 +48,27 @@ type Option func(*openConfig)
 // WithQuickCheck enables a proactive PRAGMA quick_check at open time, rate
 // limited by the sidecar stamp file <path>.quickcheck (whose mtime records the
 // last passing check) to at most once per RECARTO_QUICKCHECK_INTERVAL — default
-// 24h, "0" disables it entirely.
+// 24h, "0" disables it entirely. Only one process checks a store at a time
+// (see quickCheckLock); an opener that finds a check running elsewhere opens
+// without one.
 //
 // It exists because the damaging case is a store that opens and READS perfectly
 // while its damage sits in pages a read never touches: the session runs happily
-// until the first write fails. A long-lived serving process therefore checks
-// once at startup and repairs before serving, so the session begins healthy.
-// Short-lived opens (hooks, one-shot CLI commands) deliberately do not pass this
-// — they stay exactly as cheap as before and are covered by the reactive
-// open-time repair below.
+// until the first write fails. `recarto serve` therefore checks once, in the
+// background after it has answered the MCP handshake, and repairs before its
+// tool calls use the store. Short-lived opens (hooks, one-shot CLI commands)
+// deliberately do not pass this — they stay exactly as cheap as before and are
+// covered by the reactive open-time repair below.
+//
+// ctx bounds the check: when it is done the check is interrupted and Open fails
+// with the interruption error, and the lock file's trace holds off the next
+// check for an hour.
 //
 // The stamp is a plain sidecar file rather than a meta row precisely because it
 // must be readable and writable when the database is not.
-func WithQuickCheck() Option { return func(c *openConfig) { c.quickCheck = true } }
+func WithQuickCheck(ctx context.Context) Option {
+	return func(c *openConfig) { c.quickCheck = ctx }
+}
 
 // Open creates (if needed) and opens the store at path, applies PRAGMAs on
 // every connection, and runs migrations. A store found to be corrupt is
@@ -98,7 +107,10 @@ func openWith(path string, busyTimeoutMs int, cfg openConfig, mayRepair bool) (*
 	}
 	db.Close()
 
-	if !mayRepair || !IsCorrupt(err) || !AutoRepairEnabled() {
+	if mayRepair && IsCorrupt(err) && !AutoRepairEnabled() {
+		return nil, fmt.Errorf("%w — automatic repair is off; run 'recarto repair' to rebuild the store", err)
+	}
+	if !mayRepair || !IsCorrupt(err) {
 		return nil, err
 	}
 	stats, rerr := Repair(path)
@@ -184,8 +196,8 @@ func prepare(db *sql.DB, path string, cfg openConfig) error {
 	if err := Migrate(db); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	if cfg.quickCheck {
-		return runQuickCheck(db, path)
+	if cfg.quickCheck != nil {
+		return runQuickCheck(cfg.quickCheck, db, path)
 	}
 	return nil
 }
@@ -212,28 +224,132 @@ func quickCheckInterval() time.Duration {
 	return d
 }
 
+// timeNow is the clock for the stamp and the trace; tests replace it.
+var timeNow = time.Now
+
+// quickCheck runs the proactive check itself; tests replace it to block or
+// count checks.
+var quickCheck = func(ctx context.Context, db *sql.DB) error {
+	return checkIntegrity(ctx, db, `PRAGMA quick_check(1)`)
+}
+
+// quickCheckLock is the file a running check holds an OS lock on, so only one
+// process checks a store at a time. The OS drops the lock with its holder, so a
+// killed check never blocks the next one. The file's content is the trace of an
+// unfinished check. The file is never removed: removing a locked file would let
+// two processes lock two different files of the same name.
+func quickCheckLock(path string) string { return path + ".quickcheck.lock" }
+
+const (
+	// quickCheckRetryAfter is how long an interrupted check holds off the next.
+	quickCheckRetryAfter = time.Hour
+	// quickCheckHeartbeat is how often a running check refreshes its trace.
+	quickCheckHeartbeat = 10 * time.Second
+)
+
+// stampFresh reports whether a check passed less than interval ago.
+func stampFresh(path string, interval time.Duration) bool {
+	fi, err := os.Stat(quickCheckStamp(path))
+	return err == nil && timeNow().Sub(fi.ModTime()) < interval
+}
+
+// writeTrace records that a check of this process was alive at at.
+func writeTrace(f *os.File, at time.Time) error {
+	b := []byte(fmt.Sprintf("pid=%d at=%d", os.Getpid(), at.UnixMilli()))
+	if _, err := f.WriteAt(b, 0); err != nil {
+		return err
+	}
+	return f.Truncate(int64(len(b)))
+}
+
+// readTrace returns when an unfinished check was last known alive. Empty or
+// unparseable content counts as no trace: the trace is advisory, and a write
+// cut short must not stop checks forever.
+func readTrace(f *os.File) (time.Time, bool) {
+	b := make([]byte, 64)
+	n, _ := f.ReadAt(b, 0)
+	var pid int
+	var ms int64
+	if _, err := fmt.Sscanf(string(b[:n]), "pid=%d at=%d", &pid, &ms); err != nil {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(ms), true
+}
+
 // runQuickCheck runs PRAGMA quick_check(1) at most once per interval, stamping
 // the sidecar on success. quick_check is used rather than integrity_check
 // because it stops at the first problem and skips the (expensive) index-content
 // verification — enough to decide "this file needs rebuilding".
-func runQuickCheck(db *sql.DB, path string) error {
+func runQuickCheck(ctx context.Context, db *sql.DB, path string) error {
 	interval := quickCheckInterval()
-	if interval == 0 {
+	if interval == 0 || stampFresh(path, interval) {
 		return nil
 	}
-	stamp := quickCheckStamp(path)
-	if fi, err := os.Stat(stamp); err == nil && time.Since(fi.ModTime()) < interval {
-		return nil
-	}
-	if err := checkIntegrity(context.Background(), db, `PRAGMA quick_check(1)`); err != nil {
+	f, err := os.OpenFile(quickCheckLock(path), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
 		return err
 	}
-	// Best effort: a store dir we cannot stamp just means checking every open.
-	if f, err := os.OpenFile(stamp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
-		_ = f.Close()
-		_ = os.Chtimes(stamp, time.Now(), time.Now())
+	// Closing the file releases the lock. A close error loses nothing: the trace
+	// writes have already reported theirs.
+	defer func() { _ = f.Close() }()
+	ok, err := tryLockFile(f)
+	if err != nil {
+		return err
 	}
-	return nil
+	if !ok {
+		return nil // another process is checking this store
+	}
+	// Another process may have passed between our stamp read and the lock.
+	if stampFresh(path, interval) {
+		return nil
+	}
+	// A check was interrupted within the hour; the extra heartbeat covers a
+	// checker killed just before its next beat.
+	if t, ok := readTrace(f); ok && timeNow().Sub(t) < quickCheckRetryAfter+quickCheckHeartbeat {
+		return nil
+	}
+	if err := writeTrace(f, timeNow()); err != nil {
+		return err
+	}
+	stop := heartbeat(f)
+	err = quickCheck(ctx, db)
+	stop()
+	if ctx.Err() != nil {
+		return errors.Join(fmt.Errorf("integrity check interrupted: %w", ctx.Err()), writeTrace(f, timeNow()))
+	}
+	if err == nil {
+		// Best effort: a store dir we cannot stamp just means checking every open.
+		stamp := quickCheckStamp(path)
+		if sf, serr := os.OpenFile(stamp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); serr == nil {
+			_ = sf.Close()
+			_ = os.Chtimes(stamp, timeNow(), timeNow())
+		}
+	}
+	// A trace that cannot be cleared only delays a later check by an hour.
+	_ = f.Truncate(0)
+	return err
+}
+
+// heartbeat refreshes f's trace every quickCheckHeartbeat until the returned
+// stop is called; stop returns once no write can still be in flight.
+func heartbeat(f *os.File) (stop func()) {
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(quickCheckHeartbeat)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				// A missed beat only shortens the hold-off.
+				_ = writeTrace(f, timeNow())
+			}
+		}
+	}()
+	return func() { close(done); <-exited }
 }
 
 // Close closes the underlying pool.
@@ -245,15 +361,38 @@ func (s *Store) Path() string { return s.path }
 // Checkpoint flushes the WAL into the main database file and truncates the WAL,
 // bounding on-disk growth during a long sequence of writes (e.g. a full graph
 // index, where the WAL would otherwise accumulate every inserted row until the
-// next passive auto-checkpoint). PRAGMA wal_checkpoint returns a status row
-// (busy, log frames, checkpointed frames); a non-zero busy is not an error — it
-// just means a reader held the WAL and the truncation will happen on a later
-// call — so only a genuine statement failure is surfaced.
+// next passive auto-checkpoint).
+//
+// It never waits for another connection. A TRUNCATE checkpoint has to wait for
+// every reader of an older snapshot and holds off new writers while it waits,
+// so behind one long read the 5 s busy timeout stalled each caller and every
+// writer queued after it. It runs with no busy timeout instead: it copies what
+// it can and, while a reader or writer is active, leaves the truncation to a
+// later call. PRAGMA wal_checkpoint reports that as busy=1 in its status row,
+// not as an error, so only a genuine failure is returned.
 func (s *Store) Checkpoint(ctx context.Context) error {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	// Close only hands the connection back to the pool; there is nothing to undo.
+	defer func() { _ = conn.Close() }()
+	var prior int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prior); err != nil {
+		return err
+	}
+	defer func() {
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA busy_timeout=%d`, prior)); err != nil {
+			// A connection left without a busy timeout would fail every later
+			// writer at once instead of waiting; drop it from the pool.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
+		return err
+	}
 	var busy, logFrames, checkpointed int
-	err := s.DB.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).
-		Scan(&busy, &logFrames, &checkpointed)
-	return err
+	return conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
 }
 
 // maxWriteRetries bounds how many extra times WriteTx restarts a transaction
@@ -271,6 +410,21 @@ const maxWriteRetries = 6
 // the whole transaction is safely retried with bounded backoff on SQLITE_BUSY.
 func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
 	return s.writeTx(ctx, fn, false)
+}
+
+// ReadTx runs fn in one read transaction: every read in fn sees the same state
+// of the store while other connections and processes write.
+func (s *Store) ReadTx(ctx context.Context, fn func(c Conn) error) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		// The transaction wrote nothing, so a failed rollback loses nothing.
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // bulkCacheMBDefault is the WriteTxBulk page-cache size in MiB when
@@ -478,7 +632,7 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error, bulk boo
 // Recovery is deliberately not attempted mid-session: repair renames the store
 // file set aside, which is not safe to do under a live connection pool that
 // unsynchronised readers all over the codebase are using. The next Open repairs
-// it — and `recarto serve` additionally checks proactively at startup
+// it — and `recarto serve` additionally checks proactively after start-up
 // (WithQuickCheck), so the following session begins on a healthy store.
 func corruptGuidance(err error) error {
 	return fmt.Errorf("memory store is corrupt: %w — run 'recarto repair' to rebuild it "+

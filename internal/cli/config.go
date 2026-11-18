@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +26,9 @@ func hintInit(out io.Writer, path string, change func() error) error {
 	before := instructions()
 	err := change()
 	if instructions() != before {
-		fmt.Fprintln(out, initHint)
+		if _, perr := fmt.Fprintln(out, initHint); perr != nil {
+			return errors.Join(err, perr)
+		}
 	}
 	return err
 }
@@ -47,8 +50,8 @@ func Config(out io.Writer, args []string) error {
 	case "list":
 		return configList(out, path)
 	case "path":
-		fmt.Fprintln(out, path)
-		return nil
+		_, err := fmt.Fprintln(out, path)
+		return err
 	case "enable", "disable":
 		if len(names) == 0 {
 			return fmt.Errorf("config %s: name a feature (recarto config list shows them)", sub)
@@ -79,20 +82,28 @@ func Config(out io.Writer, args []string) error {
 // configList prints every feature with its state, then the config file's
 // problems, if any, as the error.
 func configList(out io.Writer, path string) error {
-	s, err := features.Read(path)
+	s, readErr := features.Read(path)
 	width := 0
 	for _, f := range features.All() {
 		width = max(width, len(f.Key))
 	}
-	fmt.Fprintln(out, path)
+	if _, err := fmt.Fprintln(out, path); err != nil {
+		return err
+	}
 	group := ""
 	for _, f := range features.All() {
 		if f.Group != group {
 			group = f.Group
-			fmt.Fprintf(out, "\n%s\n", group)
+			if _, err := fmt.Fprintf(out, "\n%s\n", group); err != nil {
+				return err
+			}
 		}
-		fmt.Fprintf(out, "  %-3s  %-*s  %s\n", features.OnOff(s.On(f)), width, f.Key, f.Desc)
+		if _, err := fmt.Fprintf(out, "  %-3s  %-*s  %s\n", features.OnOff(s.On(f)), width, f.Key, f.Desc); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintln(out, "\nSwitch with recarto config enable|disable <feature>, or run recarto config in a terminal.")
-	return err
+	if _, err := fmt.Fprintln(out, "\nSwitch with recarto config enable|disable <feature>, or run recarto config in a terminal."); err != nil {
+		return err
+	}
+	return readErr
 }

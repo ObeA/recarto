@@ -24,8 +24,8 @@ func Hook(ctx context.Context, a *app.App, in io.Reader, out io.Writer, args []s
 }
 
 // runHook is the `recarto hook` command. It opens the App only when the event
-// has something to act on — an idle hook, or a post-edit or shell file view
-// outside every served repo, costs little more than a process start — and
+// has something to act on — an idle hook, or a post-edit, shell file view or
+// search outside every served repo, costs little more than a process start — and
 // skips the workspace store for the per-tool hooks, which never read it. It
 // never fails the host's tool call: errors (a store that cannot open included)
 // go to stderr only, and a panic is swallowed before anything reaches out.
@@ -39,26 +39,40 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 			_ = a.Close()
 		}
 	}()
+	var warm bool
 	open := func(ev agents.Event) (*app.App, error) {
 		cfg := app.Config{SkipWorkspace: ev.Kind != agents.KindSessionStart && ev.Kind != agents.KindStop}
-		var files []string // the event acts only on these files
+		var files, searched []string // the event acts only on these
 		switch {
 		case ev.Kind == agents.KindPostEdit:
 			files = []string{ev.FilePath}
-		case ev.Kind == agents.KindShell && len(ev.Patterns) == 0:
-			files = ev.Files
+		case ev.Kind == agents.KindAugment:
+			searched = ev.SearchPaths
+		case ev.Kind == agents.KindShell && (len(ev.Patterns) == 0 || ev.SearchPaths != nil):
+			files, searched = ev.Files, ev.SearchPaths
 		}
-		if files != nil {
-			if wts, err := app.Worktrees(cfg); err == nil && !slices.ContainsFunc(files, func(f string) bool { return agents.Owned(wts, f) }) {
-				return nil, nil // the handler ignores files outside every served repo
+		if files != nil || searched != nil {
+			if wts, err := app.Worktrees(cfg); err == nil &&
+				!slices.ContainsFunc(files, func(f string) bool { return agents.Owned(wts, f) }) &&
+				!slices.ContainsFunc(searched, func(p string) bool { return agents.Reaches(wts, p) }) {
+				return nil, nil // the handler ignores files and searches outside every served repo
 			}
 		}
 		var err error
 		a, err = app.Open(cfg)
+		warm = err == nil && ev.Kind == agents.KindSessionStart
 		return a, err
 	}
 	if err := hook(ctx, open, in, out, args); err != nil {
 		fmt.Fprintln(os.Stderr, "recarto hook:", err)
+	}
+	// Session start hands the graph work to its own process, so the hook never
+	// waits for an index. It starts after the block is written, so it cannot
+	// race the block's reads of the graph.
+	if warm {
+		if err := startWarm(); err != nil {
+			fmt.Fprintln(os.Stderr, "recarto hook: start the background index:", err)
+		}
 	}
 }
 

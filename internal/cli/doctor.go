@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -14,8 +16,14 @@ import (
 
 // Doctor runs health checks: store reachable, WAL enabled, integrity ok, a schema
 // version applied, and git identity resolved. It returns an error if any fail so
-// the process exits non-zero.
-func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
+// the process exits non-zero. --quick runs the quick check instead of the full
+// integrity check.
+func Doctor(ctx context.Context, a *app.App, w io.Writer, args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	quick := fs.Bool("quick", false, "run the quick check instead of the full integrity check")
+	if helped, err := parseFlags(fs, args); helped || err != nil {
+		return err
+	}
 	allOK := true
 	check := func(name string, pass bool, detail string) {
 		status := "ok"
@@ -36,13 +44,28 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 	// A hard failure of the query or the scan is itself a common corruption
 	// outcome, so it reports as a failed check with the repair hint rather than
 	// aborting doctor with a bare SQLite error.
-	integ, err := integrityDetail(ctx, a)
+	fi, err := os.Stat(a.Store.Path())
+	if err != nil {
+		return err
+	}
+	name, pragma := "integrity", `PRAGMA integrity_check`
+	notice := "checking store integrity (%s): this can take minutes on a large store; --quick runs a faster check\n"
+	if *quick {
+		name, pragma = "quick_check", `PRAGMA quick_check`
+		notice = "running the quick check on the store (%s): this can take minutes on a large store\n"
+	}
+	if _, err := fmt.Fprintf(w, notice, sizeText(fi.Size())); err != nil {
+		return err
+	}
+	integ, err := integrityDetail(ctx, a, pragma)
 	if err != nil {
 		integ = err.Error()
 	}
-	check("integrity", err == nil && integ == "ok", integ)
+	check(name, err == nil && integ == "ok", integ)
 	if err != nil || integ != "ok" {
-		fmt.Fprintln(w, "  hint: run 'recarto repair' to rebuild the store, salvaging your memories")
+		if _, err := fmt.Fprintln(w, "  hint: run 'recarto repair' to rebuild the store, salvaging your memories"); err != nil {
+			return err
+		}
 	}
 
 	reportLastRepair(ctx, a, w)
@@ -78,7 +101,9 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 	// Sync reachability is diagnostic only: an unreachable server must never
 	// fail doctor (offline mode is the floor), so this check never flips allOK.
 	if a.Sync == nil {
-		fmt.Fprintln(w, "[ok] sync: disabled")
+		if _, err := fmt.Fprintln(w, "[ok] sync: disabled"); err != nil {
+			return err
+		}
 	} else {
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err := a.Sync.Ping(pctx)
@@ -98,10 +123,18 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 	return nil
 }
 
-// integrityDetail runs PRAGMA integrity_check and joins its findings. A healthy
-// store answers with the single row "ok".
-func integrityDetail(ctx context.Context, a *app.App) (string, error) {
-	rows, err := a.Store.DB.QueryContext(ctx, `PRAGMA integrity_check`)
+// sizeText formats a file size in GB or MB.
+func sizeText(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+}
+
+// integrityDetail runs pragma (PRAGMA integrity_check or quick_check) and joins
+// its findings. A healthy store answers with the single row "ok".
+func integrityDetail(ctx context.Context, a *app.App, pragma string) (string, error) {
+	rows, err := a.Store.DB.QueryContext(ctx, pragma)
 	if err != nil {
 		return "", err
 	}

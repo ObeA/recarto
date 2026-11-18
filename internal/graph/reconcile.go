@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -50,6 +51,19 @@ const graphTokenKey = "graph_token:"
 // Without it, an abort after the last file write produces an empty worklist next
 // run, which would otherwise be indistinguishable from "nothing to do".
 func resolvePendingKey(worktree string) string { return "graph_resolve_pending:" + worktree }
+
+// waitingForIndex is the progress phase of a reconcile waiting for another
+// process that indexes the same worktree.
+const waitingForIndex = "waiting for another process to finish indexing this worktree"
+
+// indexFileBase is the path, without extension, of worktree's index lock file
+// and deferred-edit mark: beside the store, named by a hash of the worktree path.
+func (e *Engine) indexFileBase(worktree string) string {
+	return filepath.Join(filepath.Dir(e.st.Path()), "index-locks", sha256hex([]byte(worktree))[:16])
+}
+
+// indexLockPath is the file whose lock lets one process at a time index worktree.
+func (e *Engine) indexLockPath(worktree string) string { return e.indexFileBase(worktree) + ".lock" }
 
 // resolvePending reports whether worktree has an interrupted reconcile to finish.
 func (e *Engine) resolvePending(ctx context.Context, worktree string) bool {
@@ -500,11 +514,18 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 // the token and triggers a reconcile. The only residual gap is a re-edit that
 // leaves both mtime and size byte-for-byte identical, which a real write does not
 // produce.
+//
+// While another process indexes the worktree it waits for that process, then
+// re-checks freshness, so the work is done once. Before it returns it takes in
+// the edits the post-edit hook left to it (see ReindexFileIncremental).
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string, opts ...ReconcileOption) error {
-	var o reconcileOptions
-	for _, opt := range opts {
-		opt(&o)
+	// The mark comes before the freshness check and the reconcile's reads, so a
+	// sweep pruning this worktree concurrently sees it and stops (see PruneWorktree).
+	if err := e.MarkUsed(ctx, worktree); err != nil {
+		return err
 	}
+	var o reconcileOptions
+	o.resolve(opts)
 	// A matching token alone is not proof of health: a reconcile that died
 	// mid-recovery leaves the pending marker (or physically missing indexes)
 	// behind a token an earlier run stamped, so graphFresh checks all three.
@@ -512,6 +533,29 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 	if !o.force && e.graphFresh(ctx, worktree, token) {
 		return nil
 	}
+	// Session starts, MCP servers and CLI commands of several sessions share the
+	// store; two of them indexing one worktree at once would do the work twice.
+	release, err := store.LockFile(ctx, e.indexLockPath(worktree), func() { o.progress.Phase(waitingForIndex) })
+	if err != nil {
+		return err
+	}
+	err = e.reconcileLocked(ctx, worktree, src, token, o.force, opts...)
+	if err == nil {
+		// An edit the post-edit hook left to the lock holder goes in before this run ends.
+		err = e.drainDeferred(ctx, worktree, src)
+	}
+	release()
+	return errors.Join(err, e.takeDeferred(ctx, worktree))
+}
+
+// reconcileLocked is ReconcileIfStale's work under worktree's index lock.
+func (e *Engine) reconcileLocked(ctx context.Context, worktree string, src Source, token string, force bool, opts ...ReconcileOption) error {
+	// The process this one waited for may have just indexed this same state.
+	if !force && e.graphFresh(ctx, worktree, token) {
+		return nil
+	}
+	// A lost count only understates the runs; the index itself goes ahead.
+	_ = e.led.Incr(ctx, "lifetime", "graph_index_runs", 1)
 	if err := e.Reconcile(ctx, worktree, src, opts...); err != nil {
 		return err
 	}

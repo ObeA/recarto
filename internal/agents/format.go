@@ -55,6 +55,9 @@ func largeReadThreshold() int {
 	return largeReadTokens
 }
 
+// indexingLine stands in for the code map while the worktree's index is unfinished.
+const indexingLine = "The code graph is still being indexed; graph results may be incomplete."
+
 // memoryHeader opens the repo memory tier of the session-start block.
 const memoryHeader = "Recarto memory for this repo/branch:\n"
 
@@ -62,7 +65,8 @@ const memoryHeader = "Recarto memory for this repo/branch:\n"
 // (always, full body), cerebrum memories (title + trimmed body, degrading to
 // titles-only then dropping under budget pressure), an optional cross-repo
 // workspace tier (wsResults, already token-budgeted by their own recall), a
-// bounded module map, and a titles-only recent-bugs tier — followed by the
+// bounded module map (or, while indexing is set, one line saying the graph is
+// still being indexed), and a titles-only recent-bugs tier — followed by the
 // record nudge.
 //
 // It also returns the IDs of the memories it actually rendered (full or title-only,
@@ -78,7 +82,7 @@ const memoryHeader = "Recarto memory for this repo/branch:\n"
 // line and record nudge go too, leaving the other tiers; a line pointing at
 // tools f turns off is left out.
 func formatSessionContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
-	extraRepos []string, arch graph.Architecture, bugs []*memory.Record,
+	extraRepos []string, arch graph.Architecture, indexing bool, bugs []*memory.Record,
 	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int, f features.Set) (string, []string) {
 	var b strings.Builder
 	memories := f.On(features.SessionMemories)
@@ -102,7 +106,9 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			strings.Join(extraRepos, ", "))
 	}
 
-	if len(arch.Modules) > 0 {
+	if indexing {
+		b.WriteString("\n" + indexingLine + "\n")
+	} else if len(arch.Modules) > 0 {
 		// Select the highest-signal modules/deps for the map rather than the
 		// alphabetically-first ones: rank product modules by file count and the
 		// heaviest dependency edges by reference count, demoting test projects.
@@ -115,7 +121,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
 		}
 		if f.On(features.GraphTools) {
-			b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
+			b.WriteString("Query the code graph with the recarto MCP tools (search, snippet, callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
 		}
 	}
 
@@ -126,7 +132,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	if len(bugs) > 0 {
 		b.WriteString("\nRecent bugs")
 		if f.On(features.MemoryTools) {
-			b.WriteString(" (search_bugs for detail)")
+			b.WriteString(" (recarto MCP tool `search_bugs` for detail)")
 		}
 		b.WriteString(":\n")
 		for _, r := range bugs {
@@ -138,7 +144,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	}
 
 	if memories && f.On(features.MemoryTools) {
-		b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
+		b.WriteString("\nRecord new learnings with the recarto MCP tool `record_memory` and bug fixes with `record_bug`.")
 	}
 	return strings.TrimSpace(b.String()), emitted
 }
@@ -245,7 +251,7 @@ func formatBugWarnings(loc string, bugs []*memory.Record, pointer bool) string {
 			line += " — fix: " + clip(fix, fixMax)
 		}
 		if pointer {
-			line += fmt.Sprintf(" (full text: get_memory id=%s)", r.ID)
+			line += fmt.Sprintf(" (full text: recarto MCP tool `get_memory`, id=%s)", r.ID)
 		}
 		lines = append(lines, line)
 	}
@@ -412,7 +418,7 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 			b.WriteString(line + "\n")
 		}
 		if pointer {
-			fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
+			fmt.Fprintf(&b, "(the recarto MCP tool `get_graph_delta` lists all %d)\n", total)
 		}
 		return b.String()
 	}
@@ -436,7 +442,7 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 		out = fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n",
 			date, total)
 		if pointer {
-			out += "(get_graph_delta lists them)\n"
+			out += "(the recarto MCP tool `get_graph_delta` lists them)\n"
 		}
 	}
 	return out

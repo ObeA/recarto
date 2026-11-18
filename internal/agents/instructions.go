@@ -21,28 +21,33 @@ var (
 	needsTodos  = []*features.Feature{features.MemoryTools, features.Todos}
 	needsGraph  = []*features.Feature{features.GraphTools}
 	needsIssues = []*features.Feature{features.IssueReports}
+	// needsAnyTool lists the features that register at least one MCP tool.
+	needsAnyTool = []*features.Feature{features.MemoryTools, features.GraphTools, features.IssueReports}
 )
 
 // instructionParts is the guidance written to each host's instructions file
 // (AGENTS.md at repo scope; the host's global instructions file at user scope),
-// in order. A part is written only when every feature it needs is on: those
-// are the features that register the MCP tools it names (mcp.NewServer).
+// in order. A part is written only when every feature in needs is on and, when
+// anyOf is set, at least one feature in anyOf is on: those are the features
+// that register the MCP tools it names (mcp.NewServer).
 var instructionParts = []struct {
 	needs []*features.Feature
+	anyOf []*features.Feature
 	text  string
 }{
-	{nil, "# Recarto\n\nThis repo uses **Recarto**: memory that persists across sessions (preferences, learnings, decisions, do-not-repeats, bugs)"},
-	{needsGraph, " and a code graph"},
-	{nil, "."},
-	{needsMemory, "\n\n- **Record** learnings with `record_memory` and bug fixes with `record_bug`. Near-duplicates merge, so record freely." +
+	{nil, nil, "# Recarto\n\nThis repo uses **Recarto**: memory that persists across sessions (preferences, learnings, decisions, do-not-repeats, bugs)"},
+	{needsGraph, nil, " and a code graph"},
+	{nil, nil, "."},
+	{nil, needsAnyTool, "\n\nThe tools named here are tools of the `recarto` MCP server. Your host may list them under that server's name, or load them only on demand: then load them by the name `recarto` before you call them."},
+	{needsMemory, nil, "\n\n- **Record** learnings with `record_memory` and bug fixes with `record_bug`. Near-duplicates merge, so record freely." +
 		"\n- **Anchor** each memory to the `files` or `symbols` it concerns: an anchored bug, do-not-repeat, decision or learning comes back when that code is read or edited. Without anchors, a memory only returns at session start or through recall." +
 		"\n- **Record a `preference`** the moment the user corrects your approach, rejects a suggestion or states a style, workflow or naming choice. The bar is low."},
-	{needsTodos, "\n- **Track open work** as a `todo` memory anchored to its files, and close it with `complete_todo` when it is done."},
-	{needsMemory, "\n- **Before changing code**, call `recall_memory` with the task in plain words, and `search_bugs`." +
+	{needsTodos, nil, "\n- **Track open work** as a `todo` memory anchored to its files, and close it with `complete_todo` when it is done."},
+	{needsMemory, nil, "\n- **Before changing code**, call `recall_memory` with the task in plain words, and `search_bugs`." +
 		"\n- `list_memory`: list stored memories by kind or branch." +
 		"\n- `get_memory`: read one memory by id." +
 		"\n- `forget_memory`: delete a memory recorded in error."},
-	{needsGraph, "\n\nUse the code graph instead of reading whole files or grepping:" +
+	{needsGraph, nil, "\n\nUse the code graph instead of reading whole files or grepping:" +
 		"\n- `search_graph`: find symbols by name or concept; pass `candidate_symbols`, the names you expect." +
 		"\n- `get_code_snippet`: read the source of one symbol, or several at once, instead of the whole file." +
 		"\n- `get_file_outline`: a file's symbols and line ranges, before you open a large file." +
@@ -54,7 +59,7 @@ var instructionParts = []struct {
 		"\n- `query_graph`: exact lookups by kind, name, path, language or edge." +
 		"\n- `get_architecture`: the modules and their dependencies, to orient in unfamiliar code." +
 		"\n- `get_graph_delta`: what changed in the code since your last session here, before you trust what you recall about it."},
-	{needsIssues, "\n\nWhen a Recarto tool fails, misleads you or lacks something you need, report it with `report_recarto_issue`."},
+	{needsIssues, nil, "\n\nWhen a Recarto tool fails, misleads you or lacks something you need, report it with `report_recarto_issue`."},
 }
 
 // Instructions returns the guidance for the features in s, naming only the
@@ -66,7 +71,11 @@ func Instructions(s features.Set) string {
 		for _, f := range p.needs {
 			on = on && s.On(f)
 		}
-		if on {
+		anyOn := len(p.anyOf) == 0
+		for _, f := range p.anyOf {
+			anyOn = anyOn || s.On(f)
+		}
+		if on && anyOn {
 			b.WriteString(p.text)
 		}
 	}

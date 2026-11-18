@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,7 @@ func TestOpenReposServesListedRepos(t *testing.T) {
 	if len(all) != 3 || all[0].Git.RepoID != a.Git.RepoID {
 		t.Fatalf("AllRepos must lead with the primary: %+v", all)
 	}
+	assertDescribeMatches(t, Config{CWD: scratch}, a)
 }
 
 func TestOpenReposDropsPrimaryDuplicate(t *testing.T) {
@@ -86,6 +88,23 @@ func TestOpenReposDropsPrimaryDuplicate(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	if len(a.Repos) != 0 {
 		t.Fatalf("Repos = %+v, want empty (the listed repo is the primary)", a.Repos)
+	}
+	assertDescribeMatches(t, Config{CWD: repo}, a)
+}
+
+// assertDescribeMatches checks that Describe(cfg) offers what the App opened
+// with cfg serves.
+func assertDescribeMatches(t *testing.T, cfg Config, a *App) {
+	t.Helper()
+	sv, err := Describe(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv.Repos != (len(a.Repos) > 0) || sv.Workspace != (a.Workspace != nil) {
+		t.Errorf("Describe = %+v, want Repos=%v Workspace=%v as opened", sv, len(a.Repos) > 0, a.Workspace != nil)
+	}
+	if !slices.Equal(sv.RepoIDs, a.Served().RepoIDs) {
+		t.Errorf("Describe repo ids = %v, opened = %v", sv.RepoIDs, a.Served().RepoIDs)
 	}
 }
 

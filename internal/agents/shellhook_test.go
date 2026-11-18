@@ -34,6 +34,14 @@ func (contextAdapter) Encode(_ EventKind, out io.Writer, res Result) error {
 // shell parser finds its files on disk.
 func newTreeApp(t *testing.T) (*app.App, string) {
 	t.Helper()
+	a, dir := newUnservedTreeApp(t)
+	markServing(t, a)
+	return a, dir
+}
+
+// newUnservedTreeApp is newTreeApp with no Recarto MCP server marked running.
+func newUnservedTreeApp(t *testing.T) (*app.App, string) {
+	t.Helper()
 	dir := shellTree(t)
 	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
@@ -338,6 +346,39 @@ func TestShellViewSurfacesSiblingRepoMemories(t *testing.T) {
 	} {
 		if got := shellHook(t, a, Event{SessionID: command, Command: command, CWD: scratch}); !strings.Contains(got, "c.go stays tiny") {
 			t.Errorf("%s: sibling repo's anchored decision did not fire: %q", command, got)
+		}
+	}
+}
+
+// A shell search whose paths all lie outside the served repo adds nothing:
+// no hint, no repeat mark and no nudge.
+func TestShellSearchOutsideServedRepos(t *testing.T) {
+	a, dir := newTreeApp(t)
+	indexWidgetBug(t, a)
+	other := filepath.ToSlash(t.TempDir()) // a shell word: backslashes would be escapes
+	for _, command := range []string{
+		`grep -rn Widget ` + other,
+		`rg Widget ` + other + `/*.go`,
+		`find ` + other + ` -name '*Widget*.go'`,
+		`find -L -D tree -O3 ` + other + ` -name '*Widget*.go'`,
+		`bfs -name '*Widget*.go' ` + other,
+		`cd ` + other + ` && rg Widget .`,
+	} {
+		if got := shellHook(t, a, Event{SessionID: "s", Command: command, CWD: dir}); got != "" {
+			t.Errorf("%s: got %q, want nothing", command, got)
+		}
+	}
+	grep := grepHint(t, a, "grep", "Widget")
+	if got, want := shellHook(t, a, Event{SessionID: "s", Command: `grep -rn Widget .`, CWD: dir}), grep+"\n"+shellSearchNudge; got != want {
+		t.Errorf("first search inside after outside ones:\n got %q\nwant %q", got, want)
+	}
+	for _, command := range []string{
+		`rg Widget ` + other + ` internal`,
+		`rg Widget ` + filepath.ToSlash(filepath.Dir(dir)),
+		`rg Widget "$D"`,
+	} {
+		if got := shellHook(t, a, Event{SessionID: command, Command: command, CWD: dir}); !strings.Contains(got, "widget.go:3") {
+			t.Errorf("%s: no hint:\n%s", command, got)
 		}
 	}
 }

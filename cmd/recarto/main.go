@@ -84,7 +84,8 @@ func maybePromptScope(args []string) []string {
 	}
 	fmt.Fprint(os.Stderr, "Install scope — [r]epo (this project) or [u]ser (global)? [r/u]: ")
 	var line string
-	fmt.Fscanln(os.Stdin, &line)
+	// An empty or unreadable answer leaves line empty, which picks the repo default.
+	_, _ = fmt.Fscanln(os.Stdin, &line)
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "u") {
 		return append(args, "--scope", "user")
 	}

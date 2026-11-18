@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // fakeGit + newTestApp duplicated per test package (no shared testutil yet).
@@ -50,6 +52,7 @@ func clearRecartoEnv(t *testing.T) {
 		"RECARTO_WORKSPACE", "RECARTO_REPOS",
 		"RECARTO_SYNC_URL", "RECARTO_SYNC_KEY", "RECARTO_SYNC_REPO",
 		"RECARTO_SYNC_INTERVAL", "RECARTO_SYNC_TIMEOUT",
+		"RECARTO_UNUSED_WORKTREE_DAYS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -57,10 +60,25 @@ func clearRecartoEnv(t *testing.T) {
 	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 }
 
+// newTestApp opens a test App on branch with a clean RECARTO_* env. A Recarto
+// MCP server is marked running for its repo, as in a session whose server is
+// up, so hooks point at the MCP tools.
 func newTestApp(t *testing.T, branch string) *app.App {
 	t.Helper()
 	clearRecartoEnv(t)
-	return openTestApp(t, branch)
+	a := openTestApp(t, branch)
+	markServing(t, a)
+	return a
+}
+
+// markServing marks a Recarto MCP server running for a's repo until the test ends.
+func markServing(t *testing.T, a *app.App) {
+	t.Helper()
+	release, err := app.MarkServing(a.Git.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
 }
 
 // openTestApp is newTestApp without the env reset — for helpers that set
@@ -78,4 +96,13 @@ func openTestApp(t *testing.T, branch string) *app.App {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 	return a
+}
+
+// finishIndex indexes root as a's worktree to completion. Session start no
+// longer indexes, so a test that needs the code map or graph hits does.
+func finishIndex(t *testing.T, a *app.App, root string) {
+	t.Helper()
+	if err := a.Graph.ReconcileIfStale(context.Background(), a.Git.Worktree, graph.FSSource{Root: root}, "test-token"); err != nil {
+		t.Fatal(err)
+	}
 }

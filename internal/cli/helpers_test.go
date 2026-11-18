@@ -50,6 +50,12 @@ func newTestApp(t *testing.T, branch string) *app.App {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
+	// A Recarto MCP server runs for the repo, so hooks point at the MCP tools.
+	release, err := app.MarkServing(a.Git.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
 	return a
 }
 

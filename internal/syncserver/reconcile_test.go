@@ -44,7 +44,9 @@ func TestSyncIndexIsRebuiltAfterAStoreRepair(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if pr.Accepted != 3 {
 		t.Fatalf("accepted = %d, want 3", pr.Accepted)
 	}
@@ -55,7 +57,9 @@ func TestSyncIndexIsRebuiltAfterAStoreRepair(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// A client that has already caught up to here.
 	clientCursor := pr.Cursor
@@ -68,7 +72,9 @@ func TestSyncIndexIsRebuiltAfterAStoreRepair(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&caughtUp); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(caughtUp.Records) != 0 {
 		t.Fatalf("client is not actually caught up: %+v", caughtUp.Records)
 	}
@@ -103,7 +109,9 @@ func TestSyncIndexIsRebuiltAfterAStoreRepair(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 
 		got := map[string]syncwire.Record{}
 		for _, r := range cr.Records {
@@ -152,7 +160,9 @@ func TestReconcileSyncIndexIsIdempotent(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := srv.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +177,9 @@ func TestReconcileSyncIndexIsIdempotent(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(cr.Records) != 0 {
 		t.Fatalf("a healthy store was reindexed on reopen: %+v", cr.Records)
 	}
@@ -242,7 +254,9 @@ func TestReconcileSyncIndexTombstoneWinsOverASameIdMemory(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	got := map[string]syncwire.Record{}
 	for _, r := range cr.Records {
 		got[r.ID] = r
@@ -276,7 +290,7 @@ func indexSnapshot(t *testing.T, rs *repoStore) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // a read cursor; closing only frees it
 	var b strings.Builder
 	for rows.Next() {
 		var id string

@@ -38,7 +38,8 @@ import (
 // synchronise, and renaming a WAL-mode database out from under active
 // connections is not safe. A corrupt write inside a running session therefore
 // returns actionable guidance (see writeTx) rather than repairing in place; the
-// next Open — including the proactive quick_check on `recarto serve` startup —
+// next Open — including the proactive quick_check `recarto serve` runs after
+// it has answered the MCP handshake —
 // heals the store.
 //
 // Other PROCESSES may still hold the file. The repair lockfile serialises

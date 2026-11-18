@@ -29,11 +29,11 @@ func TestServeNonGitCwdWithWorkspaceSync(t *testing.T) {
 	t.Setenv("RECARTO_SYNC_INTERVAL", "3600") // no periodic tick during the test
 
 	// Real git resolution against a plain temp dir → the NonGit fallback.
-	a, err := app.Open(app.Config{CWD: t.TempDir()})
+	cfg := app.Config{CWD: t.TempDir()}
+	a, err := app.Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = a.Close() })
 
 	// The crash preconditions, asserted so the test fails loudly if wiring
 	// changes ever stop reproducing them.
@@ -46,12 +46,21 @@ func TestServeNonGitCwdWithWorkspaceSync(t *testing.T) {
 	if !a.HasSync() {
 		t.Fatal("workspace syncer must be configured (HasSync=true is the crash precondition)")
 	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sv, err := app.Describe(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ct, st := sdk.NewInMemoryTransports()
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, a, st) }()
+	go func() {
+		done <- serve(ctx, sv, func(ctx context.Context) (*app.App, error) { return app.OpenContext(ctx, cfg) }, st)
+	}()
 
 	client := sdk.NewClient(&sdk.Implementation{Name: "test", Version: "v0"}, nil)
 	cs, err := client.Connect(ctx, ct, nil)
@@ -64,6 +73,14 @@ func TestServeNonGitCwdWithWorkspaceSync(t *testing.T) {
 	}
 	if len(tools.Tools) == 0 {
 		t.Fatal("tools/list returned no tools")
+	}
+	// A tool call waits for the background open, which starts the sync loop.
+	res, err := cs.CallTool(ctx, &sdk.CallToolParams{Name: "list_memory", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("list_memory: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("list_memory: %s", resultText(res))
 	}
 	_ = cs.Close()
 	cancel()

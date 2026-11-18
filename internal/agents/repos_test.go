@@ -1,10 +1,12 @@
 package agents
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -115,5 +117,122 @@ func TestSessionStartNamesServedRepos(t *testing.T) {
 	}
 	if !strings.Contains(res.Context, "Also serving repos: repo1") {
 		t.Fatalf("session-start block missing the served-repos note:\n%s", res.Context)
+	}
+}
+
+// servedPair serves two repos that both define Serve with a bug anchored to
+// it: the primary p (fake git) and the RECARTO_REPOS extra e (a real repo),
+// both under base, which is also HOME. outside is a directory neither holds.
+func servedPair(t *testing.T) (a *app.App, p, e, outside string) {
+	t.Helper()
+	clearRecartoEnv(t)
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, e, outside = filepath.Join(base, "p"), filepath.Join(base, "e"), t.TempDir()
+	for _, d := range []string{p, e} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initGitRepo(t, e)
+	t.Setenv("HOME", base)
+	t.Setenv("USERPROFILE", base)
+	t.Setenv("RECARTO_REPOS", e)
+	a, err = app.Open(app.Config{CWD: p, Runner: fakeGit{branch: "main", root: p}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	if len(a.Repos) != 1 {
+		t.Fatalf("serving %d extra repos, want 1", len(a.Repos))
+	}
+	ctx := context.Background()
+	const src = "package p\n\nfunc Serve() {}\n"
+	for i, rc := range a.AllRepos() {
+		if err := rc.Graph.IndexFile(ctx, rc.Git.Worktree, "serve.go", []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+		title := []string{"primary Serve bug", "extra Serve bug"}[i]
+		if _, _, _, err := rc.Engine.Record(ctx, memory.NewMemory{
+			Kind: memory.KindBug, Title: title, Body: title, Branch: rc.Git.Branch, Source: "cli",
+			Refs: []memory.Ref{{Type: memory.RefSymbol, Value: "Serve"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a, p, e, outside
+}
+
+// grepAt runs a Grep for pattern with path and cwd through RunHook, as a host
+// hook does, and returns the context it injects.
+func grepAt(t *testing.T, a *app.App, session, pattern, path, cwd string) string {
+	t.Helper()
+	var out bytes.Buffer
+	ev := Event{SessionID: session, Pattern: pattern, Path: path, CWD: cwd}
+	if err := RunHook(context.Background(), Opened(a), contextAdapter{ev}, KindAugment, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
+}
+
+// servedRepoHint reports which repos a hint lists Serve and its bug for:
+// "p", "e", "pe" or "".
+func servedRepoHint(t *testing.T, hint string) string {
+	t.Helper()
+	got := ""
+	for _, r := range []struct{ name, line, bug string }{
+		{"p", "  serve.go:3", "primary Serve bug"},
+		{"e", "  e:serve.go:3", "extra Serve bug"},
+	} {
+		line, bug := strings.Contains(hint, r.line), strings.Contains(hint, r.bug)
+		if line != bug {
+			t.Fatalf("repo %s: symbol listed %v, bug listed %v:\n%s", r.name, line, bug, hint)
+		}
+		if line {
+			got += r.name
+		}
+	}
+	if got == "" && hint != "" {
+		t.Fatalf("hint lists neither repo:\n%s", hint)
+	}
+	return got
+}
+
+// A Grep's path picks the served repos its hint covers.
+func TestGrepPathScopesTheHint(t *testing.T) {
+	a, p, e, outside := servedPair(t)
+	cases := []struct{ name, path, cwd, want string }{
+		{"outside", outside, p, ""},
+		{"no path", "", p, "pe"},
+		{"extra repo", e, p, "e"},
+		{"dot", ".", p, "p"},
+		{"relative", "../e", p, "e"},
+		{"home", "~/e", p, "e"},
+		{"contains both", filepath.Dir(p), p, "pe"},
+	}
+	if vol := filepath.VolumeName(e); runtime.GOOS == "windows" && len(vol) == 2 {
+		cases = append(cases, struct{ name, path, cwd, want string }{
+			"git bash", "/" + strings.ToLower(vol[:1]) + filepath.ToSlash(e[2:]), p, "e"})
+	}
+	for _, tc := range cases {
+		hint := grepAt(t, a, "s-"+tc.name, "Serve", tc.path, tc.cwd)
+		if got := servedRepoHint(t, hint); got != tc.want {
+			t.Errorf("%s: hint covers %q, want %q:\n%s", tc.name, got, tc.want, hint)
+		}
+	}
+}
+
+// A search outside the served repos, or in one of them, leaves the same
+// pattern's first hint in another repo intact.
+func TestScopedSearchLeavesOtherHints(t *testing.T) {
+	a, p, e, outside := servedPair(t)
+	for _, step := range []struct{ path, want string }{{outside, ""}, {e, "e"}, {p, "p"}} {
+		hint := grepAt(t, a, "s", "Serve", step.path, p)
+		if got := servedRepoHint(t, hint); got != step.want {
+			t.Errorf("Grep at %s: hint covers %q, want %q:\n%s", step.path, got, step.want, hint)
+		}
 	}
 }

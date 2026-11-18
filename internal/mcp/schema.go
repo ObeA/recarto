@@ -10,16 +10,17 @@ import (
 	"github.com/gerwim/recarto/internal/memory"
 )
 
-// inputSchema builds the input schema a's server offers for In, panicking on the
-// (compile-time-impossible) reflection error so callers stay expression-simple.
-func inputSchema[In any](a *app.App) *jsonschema.Schema {
+// inputSchema builds the input schema for In that a server offering sv has,
+// panicking on the (compile-time-impossible) reflection error so callers stay
+// expression-simple.
+func inputSchema[In any](sv app.Served) *jsonschema.Schema {
 	s, err := jsonschema.For[In](nil)
 	if err != nil {
 		panic(err)
 	}
 	// Without RECARTO_REPOS extras, repo can only name the current repo, so it
 	// would cost every tool definition context for nothing.
-	if len(a.Repos) == 0 {
+	if !sv.Repos {
 		dropProperty(s, "repo")
 	}
 	return s
@@ -55,25 +56,25 @@ func kindStrings(f features.Set) []string {
 	return out
 }
 
-func recordMemorySchema(a *app.App) *jsonschema.Schema {
-	s := withEnum(inputSchema[RecordMemoryInput](a), "kind", kindStrings(a.Features)...)
+func recordMemorySchema(sv app.Served) *jsonschema.Schema {
+	s := withEnum(inputSchema[RecordMemoryInput](sv), "kind", kindStrings(sv.Features)...)
 	// scope only chooses a store when a workspace store exists.
-	if a.Workspace == nil {
+	if !sv.Workspace {
 		dropProperty(s, "scope")
 		return s
 	}
 	return withEnum(s, "scope", scopeRepo, scopeWorkspace)
 }
 
-func traceCallPathSchema(a *app.App) *jsonschema.Schema {
-	return withEnum(inputSchema[TraceCallPathInput](a), "direction", "callers", "callees")
+func traceCallPathSchema(sv app.Served) *jsonschema.Schema {
+	return withEnum(inputSchema[TraceCallPathInput](sv), "direction", "callers", "callees")
 }
 
-func queryGraphSchema(a *app.App) *jsonschema.Schema {
-	return withEnum(inputSchema[QueryGraphInput](a), "edge_direction", "in", "out")
+func queryGraphSchema(sv app.Served) *jsonschema.Schema {
+	return withEnum(inputSchema[QueryGraphInput](sv), "edge_direction", "in", "out")
 }
 
-func reportRecartoIssueSchema(a *app.App) *jsonschema.Schema {
-	return withEnum(inputSchema[ReportRecartoIssueInput](a), "signal_type",
+func reportRecartoIssueSchema(sv app.Served) *jsonschema.Schema {
+	return withEnum(inputSchema[ReportRecartoIssueInput](sv), "signal_type",
 		"error", "quality", "friction", "gap")
 }

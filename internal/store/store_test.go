@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -508,8 +511,8 @@ func TestOpenAutoRepairsAnUnopenableStore(t *testing.T) {
 }
 
 // TestOpenHonorsAutoRepairKillSwitch: RECARTO_AUTO_REPAIR=0 must surface the
-// original error untouched, so an operator can inspect the store before
-// anything rewrites it.
+// original corruption error, with the manual repair as the next step, so an
+// operator can inspect the store before anything rewrites it.
 func TestOpenHonorsAutoRepairKillSwitch(t *testing.T) {
 	t.Setenv("RECARTO_AUTO_REPAIR", "0")
 	path := filepath.Join(t.TempDir(), "store.db")
@@ -527,6 +530,8 @@ func TestOpenHonorsAutoRepairKillSwitch(t *testing.T) {
 		t.Fatal("Open repaired the store despite RECARTO_AUTO_REPAIR=0")
 	} else if !IsCorrupt(err) {
 		t.Fatalf("error = %v, want the original corruption error", err)
+	} else if !strings.Contains(err.Error(), "recarto repair") {
+		t.Errorf("error %q does not point to 'recarto repair'", err)
 	}
 	if q := quarantines(t, path); len(q) != 0 {
 		t.Fatalf("store was quarantined despite the kill switch: %v", q)
@@ -557,7 +562,7 @@ func TestOpenWithQuickCheckRepairsAStoreThatOpensCleanly(t *testing.T) {
 		t.Fatalf("a plain open must not repair: %v", q)
 	}
 
-	st, err := Open(path, WithQuickCheck())
+	st, err := Open(path, WithQuickCheck(context.Background()))
 	if err != nil {
 		t.Fatalf("Open with quick check: %v", err)
 	}
@@ -571,6 +576,12 @@ func TestOpenWithQuickCheckRepairsAStoreThatOpensCleanly(t *testing.T) {
 	if got := scalar(t, st.DB, `SELECT count(*) FROM memories`); got != n {
 		t.Errorf("memories = %d after repair, want the %d that were readable", got, n)
 	}
+	if _, err := os.Stat(quickCheckStamp(path)); err != nil {
+		t.Errorf("the check of the repaired store must leave a stamp: %v", err)
+	}
+	if b, err := os.ReadFile(quickCheckLock(path)); err != nil || len(b) != 0 {
+		t.Errorf("lock file = %q, %v; want empty after a completed check", b, err)
+	}
 }
 
 // TestQuickCheckStampRateLimitsTheCheck: the check is expensive on a large
@@ -580,7 +591,7 @@ func TestQuickCheckStampRateLimitsTheCheck(t *testing.T) {
 	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
 	path := filepath.Join(t.TempDir(), "store.db")
 
-	st, err := Open(path, WithQuickCheck())
+	st, err := Open(path, WithQuickCheck(context.Background()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,7 +621,7 @@ func TestQuickCheckStampRateLimitsTheCheck(t *testing.T) {
 	assertCorrupt(t, path)
 
 	// Stamp is fresh → the check is skipped and the damage is not noticed yet.
-	st, err = Open(path, WithQuickCheck())
+	st, err = Open(path, WithQuickCheck(context.Background()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +635,7 @@ func TestQuickCheckStampRateLimitsTheCheck(t *testing.T) {
 	if err := os.Chtimes(quickCheckStamp(path), old, old); err != nil {
 		t.Fatal(err)
 	}
-	st, err = Open(path, WithQuickCheck())
+	st, err = Open(path, WithQuickCheck(context.Background()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +651,7 @@ func TestQuickCheckIntervalZeroDisablesTheCheck(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	buildStoreWithCorruptGraph(t, path)
 
-	st, err := Open(path, WithQuickCheck())
+	st, err := Open(path, WithQuickCheck(context.Background()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,6 +661,9 @@ func TestQuickCheckIntervalZeroDisablesTheCheck(t *testing.T) {
 	}
 	if _, err := os.Stat(quickCheckStamp(path)); !os.IsNotExist(err) {
 		t.Error("a disabled check must not stamp")
+	}
+	if _, err := os.Stat(quickCheckLock(path)); !os.IsNotExist(err) {
+		t.Error("a disabled check must not create its lock file")
 	}
 }
 
@@ -690,7 +704,7 @@ func TestWriteTxWrapsCorruptionWithGuidance(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	healed, err := Open(path, WithQuickCheck())
+	healed, err := Open(path, WithQuickCheck(context.Background()))
 	if err != nil {
 		t.Fatalf("next open did not heal the store: %v", err)
 	}
@@ -700,5 +714,229 @@ func TestWriteTxWrapsCorruptionWithGuidance(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("write still failing after the healing open: %v", err)
+	}
+}
+
+// fakeQuickCheckClock pins timeNow to a goroutine-safe fake clock at T, which
+// the test moves with the returned atomic (unix ms).
+func fakeQuickCheckClock(t *testing.T, at time.Time) *atomic.Int64 {
+	t.Helper()
+	var now atomic.Int64
+	now.Store(at.UnixMilli())
+	prev := timeNow
+	timeNow = func() time.Time { return time.UnixMilli(now.Load()) }
+	t.Cleanup(func() { timeNow = prev })
+	return &now
+}
+
+// countQuickChecks replaces the check with fn and counts its calls.
+func countQuickChecks(t *testing.T, fn func(ctx context.Context, call int32) error) *atomic.Int32 {
+	t.Helper()
+	var n atomic.Int32
+	prev := quickCheck
+	quickCheck = func(ctx context.Context, _ *sql.DB) error { return fn(ctx, n.Add(1)) }
+	t.Cleanup(func() { quickCheck = prev })
+	return &n
+}
+
+// newQuickCheckStore creates a store at a fresh path without checking it.
+func newQuickCheckStore(t *testing.T) string {
+	t.Helper()
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	path := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeTraceFile(t *testing.T, path string, at time.Time) []byte {
+	t.Helper()
+	b := []byte(fmt.Sprintf("pid=1 at=%d", at.UnixMilli()))
+	if err := os.WriteFile(quickCheckLock(path), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func readLockFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(quickCheckLock(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// lockHeld asks the OS whether another open file holds the check lock.
+func lockHeld(t *testing.T, path string) bool {
+	t.Helper()
+	f, err := os.OpenFile(quickCheckLock(path), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := tryLockFile(f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return !ok
+}
+
+func openChecked(t *testing.T, ctx context.Context, path string) {
+	t.Helper()
+	st, err := Open(path, WithQuickCheck(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQuickCheckSkipsWhileAnotherFileHoldsTheLock(t *testing.T) {
+	path := newQuickCheckStore(t)
+	T := time.Now()
+	fakeQuickCheckClock(t, T)
+	expired := writeTraceFile(t, path, T.Add(-2*time.Hour))
+	count := countQuickChecks(t, func(context.Context, int32) error { return nil })
+
+	holder, err := os.OpenFile(quickCheckLock(path), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := tryLockFile(holder); !ok || err != nil {
+		t.Fatalf("tryLockFile(holder) = %v, %v; want true, nil", ok, err)
+	}
+
+	openChecked(t, context.Background(), path)
+	if n := count.Load(); n != 0 {
+		t.Errorf("checks = %d while another file holds the lock, want 0", n)
+	}
+	if _, err := os.Stat(quickCheckStamp(path)); !os.IsNotExist(err) {
+		t.Error("a skipped check must not stamp")
+	}
+	if got := readLockFile(t, path); got != string(expired) {
+		t.Errorf("lock file = %q, want the untouched trace %q", got, expired)
+	}
+
+	if err := holder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	openChecked(t, context.Background(), path)
+	if n := count.Load(); n != 1 {
+		t.Errorf("checks = %d once the lock is free, want 1", n)
+	}
+	if _, err := os.Stat(quickCheckStamp(path)); err != nil {
+		t.Errorf("a passing check must stamp: %v", err)
+	}
+	if got := readLockFile(t, path); got != "" {
+		t.Errorf("lock file = %q after a completed check, want empty", got)
+	}
+}
+
+func TestQuickCheckRunsInOneOpenerAtATime(t *testing.T) {
+	path := newQuickCheckStore(t)
+	T := time.Now()
+	writeTraceFile(t, path, T)
+	now := fakeQuickCheckClock(t, T.Add(61*time.Minute))
+	started := make(chan struct{})
+	count := countQuickChecks(t, func(ctx context.Context, call int32) error {
+		if call > 1 {
+			return nil
+		}
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	errA := make(chan error, 1)
+	go func() {
+		st, err := Open(path, WithQuickCheck(ctxA))
+		if err == nil {
+			err = errors.Join(errors.New("interrupted Open succeeded"), st.Close())
+		}
+		errA <- err
+	}()
+	<-started
+
+	if !lockHeld(t, path) {
+		t.Fatal("the running check does not hold the lock")
+	}
+	// Past here A's trace has expired, so only the lock can stop B.
+	now.Store(T.Add(61*time.Minute + 2*time.Hour).UnixMilli())
+	openChecked(t, context.Background(), path)
+	if n := count.Load(); n != 1 {
+		t.Fatalf("checks = %d while another check runs, want 1", n)
+	}
+
+	cancelA()
+	select {
+	case err := <-errA:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("interrupted Open = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("Open did not return after its ctx was cancelled")
+	}
+	want := fmt.Sprintf("pid=%d at=%d", os.Getpid(), now.Load())
+	if got := readLockFile(t, path); got != want {
+		t.Errorf("trace = %q after the interruption, want %q", got, want)
+	}
+	if _, err := os.Stat(quickCheckStamp(path)); !os.IsNotExist(err) {
+		t.Error("an interrupted check must not stamp")
+	}
+	if lockHeld(t, path) {
+		t.Error("the interrupted check still holds the lock")
+	}
+
+	openChecked(t, context.Background(), path)
+	if n := count.Load(); n != 1 {
+		t.Errorf("checks = %d right after an interruption, want 1", n)
+	}
+}
+
+func TestInterruptedQuickCheckIsRetriedAfterAnHour(t *testing.T) {
+	path := newQuickCheckStore(t)
+	T := time.Now()
+	trace := writeTraceFile(t, path, T)
+	now := fakeQuickCheckClock(t, T)
+	count := countQuickChecks(t, func(context.Context, int32) error { return nil })
+
+	for _, skip := range []time.Duration{59 * time.Minute, time.Hour + 5*time.Second} {
+		now.Store(T.Add(skip).UnixMilli())
+		openChecked(t, context.Background(), path)
+		if n := count.Load(); n != 0 {
+			t.Fatalf("checks = %d at trace+%v, want 0", n, skip)
+		}
+		if got := readLockFile(t, path); got != string(trace) {
+			t.Fatalf("lock file = %q at trace+%v, want the untouched trace", got, skip)
+		}
+	}
+
+	now.Store(T.Add(time.Hour + 10*time.Second).UnixMilli())
+	openChecked(t, context.Background(), path)
+	if n := count.Load(); n != 1 {
+		t.Fatalf("checks = %d at trace+1h10s, want 1", n)
+	}
+	if _, err := os.Stat(quickCheckStamp(path)); err != nil {
+		t.Errorf("a passing check must stamp: %v", err)
+	}
+	if got := readLockFile(t, path); got != "" {
+		t.Errorf("lock file = %q after a completed check, want empty", got)
+	}
+
+	openChecked(t, context.Background(), path)
+	if n := count.Load(); n != 1 {
+		t.Errorf("checks = %d with a fresh stamp, want 1", n)
 	}
 }

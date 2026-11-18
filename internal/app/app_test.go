@@ -2,16 +2,22 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gerwim/recarto/internal/cache"
 	"github.com/gerwim/recarto/internal/clock"
 	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/version"
 )
 
 // fakeGit is a gitctx.Runner returning a fixed repo identity (no real git, no fs).
-type fakeGit struct{ branch string }
+type fakeGit struct{ branch, top string }
 
 func (f fakeGit) Run(args ...string) (string, error) {
 	has := func(s string) bool {
@@ -26,6 +32,9 @@ func (f fakeGit) Run(args ...string) (string, error) {
 	case args[0] == "rev-parse" && has("--git-common-dir") && has("--path-format=absolute"):
 		return "/repo/.git", nil
 	case args[0] == "rev-parse" && has("--show-toplevel"):
+		if f.top != "" {
+			return f.top, nil
+		}
 		return "/repo", nil
 	case args[0] == "symbolic-ref":
 		return f.branch, nil
@@ -87,5 +96,113 @@ func TestOpenBuildsGraphEngine(t *testing.T) {
 	a := newTestApp(t, "main")
 	if a.Graph == nil {
 		t.Fatal("App.Graph is nil")
+	}
+}
+
+func TestOpenContextInterruptsTheQuickCheck(t *testing.T) {
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	t.Setenv("RECARTO_WORKSPACE", "")
+	cfg := Config{
+		CWD:        "/repo",
+		Runner:     fakeGit{branch: "main"},
+		Clock:      clock.NewFake(time.UnixMilli(1_700_000_000_000)),
+		QuickCheck: true,
+	}
+	_, gc, err := resolvePrimary(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := cache.StorePath(gc.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a, err := OpenContext(ctx, cfg)
+	if err == nil {
+		t.Fatalf("OpenContext with a cancelled ctx succeeded (close: %v)", a.Close())
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenContext with a cancelled ctx = %v, want context.Canceled", err)
+	}
+	// store.quickCheckStamp and store.quickCheckLock name these files; this
+	// package cannot reach them.
+	if _, err := os.Stat(path + ".quickcheck"); !os.IsNotExist(err) {
+		t.Errorf("stamp after an interrupted check: %v, want none", err)
+	}
+	want := fmt.Sprintf("pid=%d at=", os.Getpid())
+	if b, err := os.ReadFile(path + ".quickcheck.lock"); err != nil || !strings.HasPrefix(string(b), want) {
+		t.Errorf("lock file after an interrupted check = %q (%v), want a trace starting %q", b, err, want)
+	}
+}
+
+// openFromMainThenWorktree opens the store first from the main checkout (/repo), the
+// first open writing the identity, and returns it with an Open from a second
+// worktree (/wt/b) of the same repo. before runs between the two opens.
+func openFromMainThenWorktree(t *testing.T, before func(a *App)) (*App, *App) {
+	t.Helper()
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_WORKSPACE", "")
+	t.Setenv("RECARTO_REPOS", "")
+	clk := clock.NewFake(time.UnixMilli(1_700_000_000_000))
+	a, err := Open(Config{CWD: "/repo", Runner: fakeGit{branch: "main"}, Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	before(a)
+	b, err := Open(Config{CWD: "/wt/b", Runner: fakeGit{branch: "b", top: "/wt/b"}, Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	if b.Git.RepoID != a.Git.RepoID || b.Git.RepoName != "b" {
+		t.Fatalf("worktree open: id %q name %q, want id %q name b", b.Git.RepoID, b.Git.RepoName, a.Git.RepoID)
+	}
+	return a, b
+}
+
+// TestOpenFromAnotherWorktreeTakesNoWriteLock: worktrees of one repo share a
+// store but each has its own directory name, so an open from another worktree
+// must not count the name as drift — it opens while another process holds the
+// write lock, which an open that wrote could not.
+func TestOpenFromAnotherWorktreeTakesNoWriteLock(t *testing.T) {
+	ctx := context.Background()
+	openFromMainThenWorktree(t, func(a *App) {
+		blocker, err := sql.Open("sqlite", "file:"+a.Store.Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = blocker.Close() })
+		bc, err := blocker.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = bc.Close() })
+		if _, err := bc.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = bc.ExecContext(ctx, "ROLLBACK") })
+	})
+}
+
+// TestOpenWritesIdentityOnVersionChange: a real identity change is still
+// written, whichever worktree opens the store.
+func TestOpenWritesIdentityOnVersionChange(t *testing.T) {
+	ctx := context.Background()
+	_, b := openFromMainThenWorktree(t, func(a *App) {
+		if _, err := a.Store.DB.ExecContext(ctx,
+			`UPDATE meta SET value='0.0.0-old' WHERE key='recarto_version'`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var v string
+	if err := b.Store.DB.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key='recarto_version'`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != version.Version {
+		t.Errorf("recarto_version = %q, want %q", v, version.Version)
 	}
 }

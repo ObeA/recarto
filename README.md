@@ -183,10 +183,15 @@ What each agent gets:
 | **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` / `~/.config/opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
 | **Copilot CLI** | `.mcp.json` / `~/.copilot/mcp-config.json` | `.github/hooks/recarto.json` / `~/.copilot/hooks/recarto.json` | `AGENTS.md` / `~/.copilot/copilot-instructions.md` |
 
-The instructions are a short block of rules between `<!-- recarto:begin -->` and `<!-- recarto:end -->`: what to record and recall, and which Recarto tool to use instead of reading whole files or grepping. How to use each tool is in the tool's own description. Re-running `recarto init` replaces the block, also one written by an older version, and leaves the rest of the file as it is.
+The instructions are a short block of rules between `<!-- recarto:begin -->` and `<!-- recarto:end -->`: what to record and recall, and which Recarto tool to use instead of reading whole files or grepping. How to use each tool is in the tool's own description. The block names them as tools of the `recarto` MCP server and tells the agent to load them by that name when its host loads tools on demand. Re-running `recarto init` replaces the block, also one written by an older version, and leaves the rest of the file as it is.
 
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
+
+On Windows, Claude Code starts Recarto's hooks directly, without a shell: `command` is
+the path to `recarto.exe` and the hook's arguments are in `args`. This needs Claude Code
+2.1.139 or later. Re-run `recarto init` to move hooks that an older Recarto set up to run
+through PowerShell.
 
 The generated OpenCode plugin works with both OpenCode 1.x and OpenCode 2.x (its
 default export carries the 2.x `setup` entrypoint and the 1.x `server` one), so it
@@ -209,8 +214,8 @@ hooks fire automatically. The CLI is available for inspection and scripting:
 ```
 recarto config            turn features on or off (interactive; or list|enable|disable|path)
 recarto licenses          print Recarto's licence and the third-party notices
-recarto status            repo id, branch, memory counts, ledger
-recarto doctor            health checks (db, WAL, integrity, git)
+recarto status            repo id, branch, store size, indexed worktrees, memory counts, ledger
+recarto doctor            health checks (db, WAL, integrity, git) (--quick: faster integrity check)
 recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
 recarto forget <id>       hard-delete a memory by id
 recarto recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)
@@ -222,7 +227,8 @@ recarto graph <sub>       query the code graph (search|grep|callers|callees|impl
                           graph impls <Type> [--super]  (implementations/subtypes; --super for supertypes)
                           graph annotated <Attribute>  (symbols decorated with [Attribute] / @decorator)
                           graph outline <file>  (a file's symbols/signatures/lines, instead of reading it)
-recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
+recarto compact           prune/decay memory + drop the graph of dead and unused worktrees (--force --dry-run --budget-tokens --vacuum)
+recarto warm              index this worktree and the served repos, drop dead and unused worktrees' graphs (session start runs it in the background)
 recarto repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
@@ -276,9 +282,9 @@ number by `recarto config` and `recarto doctor`; hooks skip the bad line.
 After a file read (Claude Code's `Read`, OpenCode's `read`, Copilot's `view`), Recarto adds the file's anchored notes and at most two notices:
 
 - **Repeat read** (`repeated-reads`). Added when every line the read returned came back in earlier reads of the same file in this conversation, and the file has not changed since. It names the lines when the read returned only part of the file. Once a file changes, reads of its old content no longer count. A read whose lines Recarto can't tell gets no notice. That includes Claude Code's own "file unchanged" reply when the agent repeats its last read.
-- **Large file** (`large-reads`). Added once per conversation, on the first whole-file read of a file with indexed symbols that returns at least 2,000 estimated tokens (`RECARTO_LARGE_READ_TOKENS`). It points to `get_file_outline` and `get_code_snippet`. A read is whole-file when it asked for no line range, even if the host cut the output short, or when the lines it returned cover the whole file. A read of part of a file never gets it.
+- **Large file** (`large-reads`). Added once per conversation, on the first whole-file read of a file with indexed symbols that returns at least 2,000 estimated tokens (`RECARTO_LARGE_READ_TOKENS`). It points to `get_file_outline` and `get_code_snippet`, while a Recarto MCP server runs for the repo (see [Tool pointers](#tool-pointers)). A read is whole-file when it asked for no line range, even if the host cut the output short, or when the lines it returned cover the whole file. A read of part of a file never gets it.
 
-On a read, an edit or a shell view, a bug note shows the title, the first 200 characters of the fix and, with `memory-tools` on, the `get_memory` call that returns the whole text. Titles longer than 160 characters are cut in these notes, in the session-start memory list and in its list of recent bugs.
+On a read, an edit or a shell view, a bug note shows the title, the first 200 characters of the fix and, with `memory-tools` on and a Recarto MCP server running for the repo, the `get_memory` call that returns the whole text. Titles longer than 160 characters are cut in these notes, in the session-start memory list and in its list of recent bugs.
 
 `recarto status` counts the notices added under `repeated_reads_blocked` and `large_reads_nudged`. On OpenCode, re-run `recarto init` after upgrading so the plugin passes the read's line range.
 
@@ -299,7 +305,13 @@ What session start adds, by its `source`:
 | `compact` | The full block, after forgetting the conversation's reads, notes and searches. Its memories count as shown again. |
 | `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
 
-Every session start also refreshes the code graph, syncs memories, imports the team snapshot and compacts memories, whatever the source. OpenCode's plugin runs session start once per session.
+Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. It then starts `recarto warm` in the background, which brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. The hook does not wait for it. While the worktree's index is unfinished, the block has one line saying so instead of the code map. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
+
+## Tool pointers
+
+Hooks name each tool they point at as a recarto MCP tool. They point at a tool only while a `recarto serve` runs on this machine for the repo: started in any of its worktrees, or serving the repo through `RECARTO_REPOS`. Without one, hints and notes keep their symbols, bugs and notes and leave out the pointer, and the large-file, shell-search and Stop nudges and the Stop reminder are skipped and not counted as given. A server that exits or crashes stops counting once its process has ended.
+
+`recarto serve` also returns a short usage text in its `initialize` reply, naming only the tools that are on.
 
 ## Search hints
 
@@ -313,8 +325,11 @@ After a Grep or Glob call, or a shell search, Recarto lists the symbols the sear
   - it is anchored to a listed symbol or to the file that defines one;
   - Recarto's branch check does not flag it as referencing code missing from this worktree;
   - this conversation has not been shown it.
+- **Scope.** A search that names paths lists symbols and bugs only from the served repos (this worktree and the `RECARTO_REPOS` repos) its paths lie in or contain. If all its paths lie outside them, it adds nothing and does not count as a repeat. A search with no path covers every served repo.
 - **Size.** A search that names no symbol adds nothing. One tool call adds at most 800 characters of hint, however many searches it runs.
 - **Repeats.** A pattern that already got a hint in this conversation, from the shell or Grep/Glob, adds nothing. `recarto status` counts these under `repeated_augments_blocked`.
+
+On OpenCode, re-run `recarto init` after upgrading so the plugin passes the Grep and Glob path.
 
 ## Shell searches and file views
 
@@ -344,7 +359,7 @@ How it reads them:
   - A file outside every served repo surfaces nothing.
 - **One hint per line.** The searches of one command line share one hint and its 800-character cap. The shell-search nudge and the notes of printed files come on top.
 - **Nudge.** A conversation's first shell search also points the agent at `search_content`
-  and `search_graph`, once per conversation.
+  and `search_graph`, once per conversation, while a Recarto MCP server runs for the repo.
 - **Dedup** works as for the tools. A pattern searched again, by the shell or by
   Grep/Glob, adds nothing. A memory already shown at
   session start, by a Read or by an earlier view is not shown again in the same conversation.
@@ -361,6 +376,9 @@ Recarto adds nothing to:
 - PowerShell and cmd: Claude Code's `PowerShell` tool, Copilot's `powershell` tool, and
   OpenCode's shell when it runs PowerShell or cmd. On Windows these hosts keep their own
   grep/glob/read tools, which Recarto hooks;
+- searches whose paths all lie outside every served repo, like `rg Foo ~/other-project` or
+  `find /tmp/x -name '*Foo*'`, not even the nudge. A search path built from a variable
+  counts as no path;
 - a command it cannot parse.
 
 Shell views are not counted as reads, so they get no repeat-read notice, large-file
@@ -396,7 +414,9 @@ recarto index             # build the code graph for this worktree
 ```
 
 `recarto doctor` checks the store (WAL, integrity, schema) and git identity, and exits
-non-zero if any check fails — so it doubles as a smoke test in scripts and CI.
+non-zero if any check fails — so it doubles as a smoke test in scripts and CI. The full
+integrity check can take minutes on a large store; `recarto doctor --quick` runs the
+faster quick check instead.
 
 **Is it doing useful work?** Run `recarto status` after a few agent sessions and watch
 the lifetime ledger counters:
@@ -404,12 +424,13 @@ the lifetime ledger counters:
 - `memories_recalled` climbing while `recall_misses` stays low → recall is hitting.
 - `recall_tokens_injected` → how much context is injected at session start.
 - `reads` / `repeated_reads_blocked` → the just-in-time bug/read surfacing is firing.
+- `graph_index_runs` → how often a worktree was indexed; a session start in an unchanged worktree adds none.
 - `live tokens N / 250000` → how full the live-set budget is (compaction prunes as it
   approaches the cap).
 
 **Is it fast?** Recarto has no built-in timing, so measure the two heavy operations —
 the graph index and recall — directly. Hooks are exit-0 CLI calls, so their latency is
-essentially these two (session-start / post-edit reconcile + session-start injection):
+essentially these two (post-edit reconcile + session-start injection; session start indexes in the background):
 
 **Linux / macOS**
 
@@ -433,11 +454,22 @@ Measure-Command { recarto recall "auth flow" }
 - **SQLite is the single source of truth** (pure-Go `modernc.org/sqlite`, WAL);
   markdown is on-demand export only.
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
-  lazily at session start and incrementally on each edit.
+  in a background process that session start starts (`recarto warm`), on a graph
+  query, and incrementally on each edit. One process at a time indexes a worktree;
+  another that needs it waits.
 - **Hooks start fast.** A hook decodes its payload first and opens only what that
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the
   checkout's HEAD changes. Measurements: `docs/validation/2026-10-22-hook-startup.md`.
+- **Worktrees.** Each worktree has its own copy of the code graph in the shared store.
+  The copy is dropped when the worktree's directory is gone, or when Recarto has not
+  been used in it for 7 days: no session, hook, graph query or `recarto index`.
+  `RECARTO_UNUSED_WORKTREE_DAYS` sets the number of days (up to 36500); `0` keeps
+  unused worktrees. Memories, bugs and todos stay. The next session or graph query in
+  that worktree indexes it again. Session start and `recarto compact` drop them;
+  `recarto compact --dry-run` lists what it would drop, and `--vacuum` returns the
+  freed space to the OS. `recarto status` shows the store's size and how many
+  worktrees it indexes.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust, Python via tree-sitter.
 
 ## If the store gets corrupted
@@ -452,11 +484,14 @@ Recarto repairs itself:
 
 - **On open.** A store that fails to open is rebuilt automatically, and the session
   continues.
-- **At `recarto serve` startup.** A `PRAGMA quick_check` runs at most once per
-  `RECARTO_QUICKCHECK_INTERVAL` (default `24h`; `0` disables it), so a store that
-  opens and reads fine but is damaged underneath is caught *before* the session's
-  first write rather than by it. Hooks and one-shot CLI commands skip this and stay
-  as fast as before.
+- **At `recarto serve` startup.** Once the server has answered the client, a
+  `PRAGMA quick_check` runs, at most once per `RECARTO_QUICKCHECK_INTERVAL` (default
+  `24h`; `0` disables it). A store that opens and reads fine but is damaged
+  underneath is then repaired *before* the session's first write. That server's tool
+  calls wait for the check or repair, and after 10 s fail with a message to try
+  again. One process checks a store at a time. A check cut short (the session closed
+  or was killed) is not retried for an hour. Hooks and one-shot CLI commands skip
+  the check.
 - **On demand.** `recarto repair` rebuilds this repo's store; `recarto repair --path
   <store.db>` targets any other one (the workspace or feedback store, another repo's
   cache). It has no corruption precondition, so it doubles as "rebuild my store,

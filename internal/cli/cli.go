@@ -11,13 +11,22 @@ import (
 	"github.com/gerwim/recarto/internal/licenses"
 )
 
-// known reports whether cmd is a CLI command that needs an open App.
-func known(cmd string) bool {
-	switch cmd {
-	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "index", "graph", "compact", "snapshot", "todo", "sync":
-		return true
-	}
-	return false
+// appCommands are the CLI commands that run on an open App, by name.
+var appCommands = map[string]func(ctx context.Context, a *app.App, out io.Writer, rest []string) error{
+	"status":   func(ctx context.Context, a *app.App, out io.Writer, _ []string) error { return Status(ctx, a, out) },
+	"doctor":   Doctor,
+	"remember": Remember,
+	"forget":   Forget,
+	"recall":   Recall,
+	"bug":      Bug,
+	"memory":   Memory,
+	"index":    Index,
+	"graph":    Graph,
+	"compact":  Compact,
+	"snapshot": Snapshot,
+	"todo":     Todo,
+	"sync":     Sync,
+	"warm":     func(ctx context.Context, a *app.App, _ io.Writer, _ []string) error { return Warm(ctx, a) },
 }
 
 // Run dispatches a CLI invocation (args excludes the program name) and writes
@@ -91,54 +100,27 @@ func Run(args []string, out io.Writer) (rerr error) {
 		return nil // hooks never block
 	}
 
-	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
-	}
-
 	// Only the long-lived serving process pays for the proactive corruption check
 	// (rate-limited to once a day by the store's stamp file): it opens once and
 	// serves for hours, so it must not discover damage on its first write. Hooks
-	// and one-shot commands stay as cheap as before.
-	cfg := app.Config{QuickCheck: cmd == "serve"}
+	// and one-shot commands stay as cheap as before. It answers the MCP handshake
+	// before it opens its stores, so it opens the App itself.
+	if cmd == "serve" {
+		return Serve(context.Background(), app.Config{QuickCheck: true})
+	}
 
-	a, err := app.Open(cfg)
+	run, ok := appCommands[cmd]
+	if !ok {
+		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync warm server export import repair)", cmd)
+	}
+
+	a, err := app.Open(app.Config{})
 	if err != nil {
 		return err
 	}
 	defer func() { rerr = errors.Join(rerr, a.Close()) }()
 
-	ctx := context.Background()
-	switch cmd {
-	case "status":
-		return Status(ctx, a, out)
-	case "doctor":
-		return Doctor(ctx, a, out)
-	case "remember":
-		return Remember(ctx, a, out, rest)
-	case "forget":
-		return Forget(ctx, a, out, rest)
-	case "recall":
-		return Recall(ctx, a, out, rest)
-	case "bug":
-		return Bug(ctx, a, out, rest)
-	case "memory":
-		return Memory(ctx, a, out, rest)
-	case "serve":
-		return Serve(ctx, a)
-	case "index":
-		return Index(ctx, a, out, rest)
-	case "graph":
-		return Graph(ctx, a, out, rest)
-	case "compact":
-		return Compact(ctx, a, out, rest)
-	case "snapshot":
-		return Snapshot(ctx, a, out, rest)
-	case "todo":
-		return Todo(ctx, a, out, rest)
-	case "sync":
-		return Sync(ctx, a, out, rest)
-	}
-	return nil // unreachable: known() gates the switch
+	return run(context.Background(), a, out, rest)
 }
 
 // binaryPath returns the absolute path of the running recarto binary (so hooks
@@ -157,8 +139,8 @@ func usage(w io.Writer) error {
   licenses          print Recarto's licence and the third-party notices
   serve             run the MCP server over stdio
   hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]
-  status            repo id, branch, memory counts, ledger
-  doctor            health checks (db, WAL, integrity, git)
+  status            repo id, branch, store size, indexed worktrees, memory counts, ledger
+  doctor            health checks (db, WAL, integrity, git) (--quick: faster integrity check)
   repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
   remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
   forget <id>       hard-delete a memory by id
@@ -168,10 +150,11 @@ func usage(w io.Writer) error {
   memory show       render all active memory as markdown (--branch)
   index             build/refresh the code graph for this worktree (--force: full rebuild/heal)
   graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)
-  compact           prune/decay memory + sweep dead worktrees (--force --dry-run --budget-tokens --vacuum)
+  compact           prune/decay memory + drop the graph of dead and unused worktrees (--force --dry-run --budget-tokens --vacuum)
   snapshot          export|import the committable team memory (.recarto/memory.jsonl)
   todo list|done    list open todos, or mark one done
   update            self-update to the latest (or a chosen) release (--version --list --check --yes)
+  warm              index this worktree and the served repos, then drop the graph of dead and unused worktrees (session start runs it in the background)
   sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop
   server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)
   export            export every project's full memory history to an archive (--out --repo --push --url --key)

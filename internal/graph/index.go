@@ -46,7 +46,27 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 // interface dispatch in OTHER files reads them (structureChanged). Only a
 // Python base change resolves fully. This is the post-edit hook path — a full
 // Resolve per keystroke cost ~14s on a large repo for a one-file change.
+// While another process indexes the worktree, the method leaves the edit to
+// that process.
 func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path string, src []byte, mtime, size int64) error {
+	release, ok, err := store.TryLockFile(e.indexLockPath(worktree))
+	if err != nil {
+		return err
+	}
+	if ok {
+		err = e.reindexFile(ctx, worktree, path, src, mtime, size)
+		release()
+	} else {
+		// Another process indexes the worktree. The hook must not wait, and
+		// writing beside it could let its older parse of this file overwrite
+		// the edit: leave the edit to that process.
+		err = e.markDeferred(worktree)
+	}
+	return errors.Join(err, e.takeDeferred(ctx, worktree))
+}
+
+// reindexFile is ReindexFileIncremental's work under worktree's index lock.
+func (e *Engine) reindexFile(ctx context.Context, worktree, path string, src []byte, mtime, size int64) error {
 	dirty := []string{path}
 	old, err := e.captureDirty(ctx, worktree, dirty)
 	if err != nil {

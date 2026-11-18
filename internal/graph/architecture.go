@@ -330,7 +330,10 @@ func moduleOf(roots []string, names map[string]string, path string) string {
 
 // archCacheVersion stamps the cached architecture payload so a binary with a
 // different computation never serves a predecessor's cache.
-const archCacheVersion = 3
+const archCacheVersion = 4
+
+// archCacheKey prefixes the meta key holding a worktree's cached code map.
+const archCacheKey = "arch_cache:"
 
 // archCachePayload is the meta-table cache entry: the full architecture, valid
 // exactly while the worktree's graph token equals Token.
@@ -347,35 +350,76 @@ type archCachePayload struct {
 // token — the same freshness signal ReconcileIfStale maintains — so repeat calls
 // (every session start renders the orientation map; agents re-orient often) skip
 // the filesystem walk and full edge aggregation while the graph is unchanged. A
-// non-git worktree never stores a token and so never caches.
+// non-git worktree never stores a token and so never caches. The unscoped form
+// is served from one read snapshot, and only a finished index is served from or
+// written to the cache.
 func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Architecture, error) {
 	if scope != "" {
-		return e.architectureUncached(ctx, worktree, scope)
+		return e.architectureUncached(ctx, e.st.DB, worktree, scope)
 	}
-	var token string
-	_ = e.st.DB.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key=?`, "graph_token:"+worktree).Scan(&token)
-	cacheKey := "arch_cache:" + worktree
-	if token != "" {
-		var raw string
-		if err := e.st.DB.QueryRowContext(ctx,
-			`SELECT value FROM meta WHERE key=?`, cacheKey).Scan(&raw); err == nil {
-			var p archCachePayload
-			if json.Unmarshal([]byte(raw), &p) == nil && p.Version == archCacheVersion && p.Token == token {
-				_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
-				return p.Arch, nil
+	arch, _, err := e.architecture(ctx, worktree, false, false)
+	return arch, err
+}
+
+// CodeMap returns the code map of worktree's finished index and done=true.
+// While the index is unfinished it returns done=false and no map. The check and
+// the map come from one read snapshot, so a reconcile committing in another
+// process meanwhile cannot put a partial map in the session block.
+func (e *Engine) CodeMap(ctx context.Context, worktree string, nonGit bool) (arch Architecture, done bool, err error) {
+	return e.architecture(ctx, worktree, nonGit, true)
+}
+
+// archHook, when non-nil, runs inside the map's read snapshot right after the
+// index state is read: a test seam to commit a write at that point. Nil in
+// production.
+var archHook func()
+
+// architecture reads worktree's index state and its unscoped map in one read
+// transaction. Only a finished index is served from or written to the cache: a
+// map of a partial graph cached under a token that a later run stamps again
+// would be served as complete. With onlyDone, an unfinished index gives no map.
+func (e *Engine) architecture(ctx context.Context, worktree string, nonGit, onlyDone bool) (arch Architecture, done bool, err error) {
+	var s indexState
+	computed := false
+	cacheKey := archCacheKey + worktree
+	err = e.st.ReadTx(ctx, func(q store.Conn) error {
+		var err error
+		if s, err = readIndexState(ctx, q, worktree); err != nil {
+			return err
+		}
+		if done, err = codeMapDone(ctx, q, worktree, nonGit, s); err != nil {
+			return err
+		}
+		if archHook != nil {
+			archHook()
+		}
+		if onlyDone && !done {
+			return nil
+		}
+		if s.finished() {
+			var raw string
+			if err := q.QueryRowContext(ctx,
+				`SELECT value FROM meta WHERE key=?`, cacheKey).Scan(&raw); err == nil {
+				var p archCachePayload
+				if json.Unmarshal([]byte(raw), &p) == nil && p.Version == archCacheVersion && p.Token == s.token {
+					_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
+					arch = p.Arch
+					return nil
+				}
 			}
 		}
-	}
-	arch, err := e.architectureUncached(ctx, worktree, scope)
+		computed = true
+		arch, err = e.architectureUncached(ctx, q, worktree, "")
+		return err
+	})
 	if err != nil {
-		return arch, err
+		return Architecture{}, false, err
 	}
-	if token != "" {
-		// Best-effort: a busy store just means the next call recomputes. The payload
-		// is keyed by the token read BEFORE computing, so a reconcile racing this
-		// write leaves a cache entry whose token no longer matches — never served.
-		if raw, jerr := json.Marshal(archCachePayload{Version: archCacheVersion, Token: token, Arch: arch}); jerr == nil {
+	if computed && s.finished() {
+		// Best-effort: a busy store just means the next call recomputes. The map
+		// was built from the snapshot whose finished index carries s.token, so the
+		// entry is right even if a reconcile has started since.
+		if raw, jerr := json.Marshal(archCachePayload{Version: archCacheVersion, Token: s.token, Arch: arch}); jerr == nil {
 			_ = e.st.WriteTx(ctx, func(c store.Conn) error {
 				_, werr := c.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES (?,?)
 				 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, cacheKey, string(raw))
@@ -383,14 +427,22 @@ func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Arch
 			})
 		}
 	}
-	return arch, nil
+	return arch, done, nil
 }
+
+// archNodesQuery and archEdgesQuery read one worktree's nodes and resolved
+// symbol-to-symbol references, driven from its files, so the map's cost does
+// not grow with the other worktrees in the store.
+const archNodesQuery = `SELECT n.id, n.file_id FROM files f CROSS JOIN nodes n ON n.file_id = f.id
+  WHERE f.worktree = ?`
+const archEdgesQuery = `SELECT e.file_id, e.dst_node_id FROM files f CROSS JOIN edges e ON e.file_id = f.id
+  WHERE f.worktree = ? AND e.dst_node_id IS NOT NULL AND e.src_node_id IS NOT NULL`
 
 // architectureUncached computes the architecture from the store. The dependency
 // aggregation streams the edges table once and joins via in-memory maps —
 // the SQL join form (edges×nodes×files×nodes×files with a path-pair GROUP BY)
 // did an index seek per edge and dominated the 2s arch latency on large repos.
-func (e *Engine) architectureUncached(ctx context.Context, worktree, scope string) (Architecture, error) {
+func (e *Engine) architectureUncached(ctx context.Context, q store.Conn, worktree, scope string) (Architecture, error) {
 	roots := projectRoots(worktree)
 	modNames := moduleNames(roots)
 	// moduleOf is O(roots) prefix matching and the same paths recur across the
@@ -420,7 +472,7 @@ func (e *Engine) architectureUncached(ctx context.Context, worktree, scope strin
 	filePath := map[string]string{}
 	type agg struct{ files, syms int }
 	byMod := map[string]*agg{}
-	rows, err := e.st.DB.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT f.id, f.path, (SELECT COUNT(*) FROM nodes n WHERE n.file_id = f.id)
 		   FROM files f WHERE f.worktree = ?`, worktree)
 	if err != nil {
@@ -457,7 +509,7 @@ func (e *Engine) architectureUncached(ctx context.Context, worktree, scope strin
 
 	// node id -> file id, for resolving an edge's target file without per-edge seeks.
 	nodeFile := make(map[string]string, 1<<17)
-	rows, err = e.st.DB.QueryContext(ctx, `SELECT id, file_id FROM nodes`)
+	rows, err = q.QueryContext(ctx, archNodesQuery, worktree)
 	if err != nil {
 		return Architecture{}, err
 	}
@@ -479,17 +531,15 @@ func (e *Engine) architectureUncached(ctx context.Context, worktree, scope strin
 	// references. Deps are computed worktree-wide (scope only applies to Modules
 	// above). This is intentional: module boundaries are top-level directories
 	// and scope filtering of Deps would silently drop edges that cross the scope
-	// boundary — easier to reason about with the full picture. The worktree
-	// membership test for both endpoints is the filePath map (built unscoped
-	// above), mirroring the old SQL's srcf.worktree/dstf.worktree filters.
+	// boundary — easier to reason about with the full picture. The query reads
+	// only edges whose source is in this worktree; the target's membership test
+	// is the filePath map (built unscoped above).
 	// src_node_id IS NOT NULL mirrors the old form's inner join on the source
 	// node: a file-scope reference (an import, or a call outside any symbol) has
 	// no source symbol and never counted as a module dependency.
 	depCount := map[[2]string]int{}
 	depGen := map[[2]string]int{} // refs whose source file is generated, per edge
-	rows, err = e.st.DB.QueryContext(ctx,
-		`SELECT file_id, dst_node_id FROM edges
-		  WHERE dst_node_id IS NOT NULL AND src_node_id IS NOT NULL`)
+	rows, err = q.QueryContext(ctx, archEdgesQuery, worktree)
 	if err != nil {
 		return Architecture{}, err
 	}
@@ -501,7 +551,7 @@ func (e *Engine) architectureUncached(ctx context.Context, worktree, scope strin
 		}
 		sp, ok := filePath[srcFile]
 		if !ok {
-			continue // edge from another worktree
+			continue // a file written between the two reads (the scoped form has no snapshot)
 		}
 		dp, ok := filePath[nodeFile[dstNode]]
 		if !ok {

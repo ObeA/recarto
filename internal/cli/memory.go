@@ -30,6 +30,6 @@ func Memory(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(w, export.Render(a.Git.RepoName, recs))
-	return nil
+	_, err = fmt.Fprint(w, export.Render(a.Git.RepoName, recs))
+	return err
 }

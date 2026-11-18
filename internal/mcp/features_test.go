@@ -46,16 +46,18 @@ func listTools(t *testing.T, a *app.App) map[string]*sdk.Tool {
 	return tools
 }
 
+// groups lists the tools each feature registers.
+var groups = map[*features.Feature][]string{
+	features.MemoryTools: {"record_memory", "record_bug", "recall_memory", "search_bugs", "get_memory",
+		"list_memory", "complete_todo", "forget_memory"},
+	features.GraphTools: {"search_graph", "trace_call_path", "get_architecture", "query_graph", "search_content",
+		"get_code_snippet", "get_file_outline", "find_implementations", "find_annotated", "find_references", "get_graph_delta"},
+	features.IssueReports: {"report_recarto_issue"},
+	features.Todos:        {"complete_todo"},
+}
+
 func TestToolsFollowFeatures(t *testing.T) {
 	a := newTestApp(t, "main")
-	groups := map[*features.Feature][]string{
-		features.MemoryTools: {"record_memory", "record_bug", "recall_memory", "search_bugs", "get_memory",
-			"list_memory", "complete_todo", "forget_memory"},
-		features.GraphTools: {"search_graph", "trace_call_path", "get_architecture", "query_graph", "search_content",
-			"get_code_snippet", "get_file_outline", "find_implementations", "find_annotated", "find_references", "get_graph_delta"},
-		features.IssueReports: {"report_recarto_issue"},
-		features.Todos:        {"complete_todo"},
-	}
 	all := listTools(t, a)
 	grouped := map[string]bool{}
 	for _, names := range groups {
@@ -127,7 +129,7 @@ func TestTodosOffRejectsTodoMemories(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	hasTodo := func() bool {
-		for _, v := range recordMemorySchema(a).Properties["kind"].Enum {
+		for _, v := range recordMemorySchema(a.Served()).Properties["kind"].Enum {
 			if v == "todo" {
 				return true
 			}

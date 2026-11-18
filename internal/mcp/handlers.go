@@ -78,13 +78,19 @@ type RecordMemoryOutput struct {
 	Note               string                 `json:"note,omitempty"`
 }
 
+// feedbackKindErr refuses feedback in record_memory and names the tool for it.
+const feedbackKindErr = "kind %q goes to the recarto MCP tool `report_recarto_issue`, not record_memory"
+
+// conflictNote asks the agent to settle a new memory against similar ones.
+const conflictNote = "Review these existing memories — if your new memory supersedes or contradicts one, call the recarto MCP tool forget_memory(old_id) (or re-record with supersedes_id). If they genuinely coexist, no action needed."
+
 func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (RecordMemoryOutput, error) {
 	kind := memory.Kind(in.Kind)
 	if !kind.Valid() {
 		return RecordMemoryOutput{}, fmt.Errorf("invalid kind %q", in.Kind)
 	}
 	if kind == memory.KindFeedback {
-		return RecordMemoryOutput{}, fmt.Errorf("kind %q is recorded via report_recarto_issue, not record_memory", in.Kind)
+		return RecordMemoryOutput{}, fmt.Errorf(feedbackKindErr, in.Kind)
 	}
 	if kind == memory.KindTodo && !a.Features.On(features.Todos) {
 		return RecordMemoryOutput{}, fmt.Errorf("todos are off in the Recarto config (recarto config)")
@@ -147,7 +153,7 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 		})
 	}
 	if len(out.ConflictCandidates) > 0 {
-		out.Note = "Review these existing memories — if your new memory supersedes or contradicts one, call forget_memory(old_id) (or re-record with supersedes_id). If they genuinely coexist, no action needed."
+		out.Note = conflictNote
 	}
 	return out, nil
 }
