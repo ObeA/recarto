@@ -517,15 +517,32 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 //
 // While another process indexes the worktree it waits for that process, then
 // re-checks freshness, so the work is done once. Before it returns it takes in
-// the edits the post-edit hook left to it (see ReindexFileIncremental).
+// the edits the post-edit hook left to it (see ReindexFileIncremental). With
+// WithoutWaiting it tries the lock first and returns ErrIndexing instead of waiting.
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string, opts ...ReconcileOption) error {
+	var o reconcileOptions
+	o.resolve(opts)
+	if o.noWait {
+		// The process holding the index lock may hold the store's write lock too,
+		// for a whole resolve, so a busy worktree is skipped before any write.
+		release, ok, err := store.TryLockFile(e.indexLockPath(worktree))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrIndexing
+		}
+		err = e.MarkUsed(ctx, worktree)
+		if err == nil {
+			err = e.reconcileLocked(ctx, worktree, src, token, o.force, opts...)
+		}
+		return e.finishLocked(ctx, worktree, src, release, err)
+	}
 	// The mark comes before the freshness check and the reconcile's reads, so a
 	// sweep pruning this worktree concurrently sees it and stops (see PruneWorktree).
 	if err := e.MarkUsed(ctx, worktree); err != nil {
 		return err
 	}
-	var o reconcileOptions
-	o.resolve(opts)
 	// A matching token alone is not proof of health: a reconcile that died
 	// mid-recovery leaves the pending marker (or physically missing indexes)
 	// behind a token an earlier run stamped, so graphFresh checks all three.
@@ -540,11 +557,23 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 		return err
 	}
 	err = e.reconcileLocked(ctx, worktree, src, token, o.force, opts...)
+	return e.finishLocked(ctx, worktree, src, release, err)
+}
+
+// ErrIndexing is ReconcileIfStale's answer under WithoutWaiting while another
+// process indexes the worktree; that process brings it up to date.
+var ErrIndexing = errors.New("another process is indexing this worktree")
+
+// finishLocked ends a ReconcileIfStale run that holds worktree's index lock,
+// given the run's error so far.
+func (e *Engine) finishLocked(ctx context.Context, worktree string, src Source, release func(), err error) error {
 	if err == nil {
 		// An edit the post-edit hook left to the lock holder goes in before this run ends.
 		err = e.drainDeferred(ctx, worktree, src)
 	}
 	release()
+	// After the release: a post-edit hook that found the lock held left its edit
+	// to the holder.
 	return errors.Join(err, e.takeDeferred(ctx, worktree))
 }
 

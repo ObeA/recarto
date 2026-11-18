@@ -17,8 +17,10 @@ type Prunable struct {
 	Dead   []string            // stored worktrees whose directory is gone
 	Unused []graph.WorktreeUse // stored worktrees last used more than Days days ago, oldest first
 	Days   int                 // RECARTO_UNUSED_WORKTREE_DAYS; 0 = unused worktrees are kept
-	at     time.Time           // when the lists were taken
-	cutoff time.Time           // at − Days days
+	// DaysErr is an invalid RECARTO_UNUSED_WORKTREE_DAYS; Days is then 0, so Unused stays empty.
+	DaysErr error
+	at      time.Time // when the lists were taken
+	cutoff  time.Time // at − Days days
 }
 
 // maxUnusedWorktreeDays bounds RECARTO_UNUSED_WORKTREE_DAYS so the cutoff
@@ -36,12 +38,13 @@ const maxUnusedWorktreeDays = 36500
 // mismatch cannot make a used worktree look unused. With no authoritative list
 // (non-git, or the command fails) it reports none of either: pruning is an
 // optimization, guessing is not. The current worktree is never in either list.
+//
+// An invalid RECARTO_UNUSED_WORKTREE_DAYS is reported in p.DaysErr, not as the
+// error: a typo must not stop deleted worktrees from being dropped. The returned
+// error is kept for real failures.
 func (a *App) PrunableWorktrees(ctx context.Context) (Prunable, error) {
-	days, err := unusedWorktreeDays()
-	if err != nil {
-		return Prunable{}, err
-	}
-	p := Prunable{Days: days, at: a.Clock.Now()}
+	days, daysErr := UnusedWorktreeDays()
+	p := Prunable{Days: days, DaysErr: daysErr, at: a.Clock.Now()}
 	p.cutoff = p.at.Add(-time.Duration(days) * 24 * time.Hour)
 	if a.Git.NonGit {
 		return p, nil
@@ -87,8 +90,7 @@ func (a *App) PrunableWorktrees(ctx context.Context) (Prunable, error) {
 // pruned. A worktree used again since p was taken keeps the graph it still has.
 func (a *App) PruneWorktrees(ctx context.Context, p Prunable) (int, error) {
 	n := 0
-	prune := func(wt string, usedBefore time.Time) error {
-		ok, err := a.Graph.PruneWorktree(ctx, wt, usedBefore)
+	count := func(ok bool, err error) error {
 		if ok {
 			n++
 		}
@@ -96,13 +98,13 @@ func (a *App) PruneWorktrees(ctx context.Context, p Prunable) (int, error) {
 	}
 	var err error
 	for _, wt := range p.Dead {
-		if err = prune(wt, p.at); err != nil {
+		if err = count(a.Graph.PruneDeadWorktree(ctx, wt, p.at)); err != nil {
 			break
 		}
 	}
 	if err == nil {
 		for _, u := range p.Unused {
-			if err = prune(u.Worktree, p.cutoff); err != nil {
+			if err = count(a.Graph.PruneWorktree(ctx, u.Worktree, p.cutoff)); err != nil {
 				break
 			}
 		}
@@ -114,9 +116,10 @@ func (a *App) PruneWorktrees(ctx context.Context, p Prunable) (int, error) {
 	return n, err
 }
 
-// unusedWorktreeDays reads RECARTO_UNUSED_WORKTREE_DAYS: unset or blank → 7;
+// UnusedWorktreeDays reads RECARTO_UNUSED_WORKTREE_DAYS: unset or blank → 7;
 // a whole number from 0 to maxUnusedWorktreeDays → that; anything else → error.
-func unusedWorktreeDays() (int, error) {
+// The 0 that comes with the error keeps unused worktrees, as 0 does.
+func UnusedWorktreeDays() (int, error) {
 	v := strings.TrimSpace(os.Getenv("RECARTO_UNUSED_WORKTREE_DAYS"))
 	if v == "" {
 		return 7, nil

@@ -190,7 +190,8 @@ your existing config.
 
 On Windows, Claude Code starts Recarto's hooks directly, without a shell: `command` is
 the path to `recarto.exe` and the hook's arguments are in `args`. This needs Claude Code
-2.1.139 or later. Re-run `recarto init` to move hooks that an older Recarto set up to run
+2.1.139 or later; `recarto init` and `recarto doctor` say so when they find an older
+one. Re-run `recarto init` to move hooks that an older Recarto set up to run
 through PowerShell.
 
 The generated OpenCode plugin works with both OpenCode 1.x and OpenCode 2.x (its
@@ -413,10 +414,11 @@ recarto doctor            # health checks — every line should read [ok]
 recarto index             # build the code graph for this worktree
 ```
 
-`recarto doctor` checks the store (WAL, integrity, schema) and git identity, and exits
-non-zero if any check fails — so it doubles as a smoke test in scripts and CI. The full
+`recarto doctor` checks the store (WAL, integrity, schema), git identity and
+`RECARTO_UNUSED_WORKTREE_DAYS`, and exits non-zero if any check fails — so it doubles as a smoke test in scripts and CI. The full
 integrity check can take minutes on a large store; `recarto doctor --quick` runs the
-faster quick check instead.
+faster quick check instead. On Windows it warns when the Claude Code on PATH is too old
+for Recarto's hooks.
 
 **Is it doing useful work?** Run `recarto status` after a few agent sessions and watch
 the lifetime ledger counters:
@@ -455,8 +457,10 @@ Measure-Command { recarto recall "auth flow" }
   markdown is on-demand export only.
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
   in a background process that session start starts (`recarto warm`), on a graph
-  query, and incrementally on each edit. One process at a time indexes a worktree;
-  another that needs it waits.
+  query, and incrementally on each edit. One process at a time indexes a worktree.
+  `recarto index`, `recarto graph` and the MCP server wait for it; `recarto warm`
+  leaves the worktree to it. A `recarto warm` run stops after 30 minutes, and the
+  next session start continues its work.
 - **Hooks start fast.** A hook decodes its payload first and opens only what that
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the
@@ -465,7 +469,8 @@ Measure-Command { recarto recall "auth flow" }
   The copy is dropped when the worktree's directory is gone, or when Recarto has not
   been used in it for 7 days: no session, hook, graph query or `recarto index`.
   `RECARTO_UNUSED_WORKTREE_DAYS` sets the number of days (up to 36500); `0` keeps
-  unused worktrees. Memories, bugs and todos stay. The next session or graph query in
+  unused worktrees. An invalid value keeps them too, while deleted worktrees are
+  still dropped; `recarto doctor` and `recarto compact` report it. Memories, bugs and todos stay. The next session or graph query in
   that worktree indexes it again. Session start and `recarto compact` drop them;
   `recarto compact --dry-run` lists what it would drop, and `--vacuum` returns the
   freed space to the OS. `recarto status` shows the store's size and how many

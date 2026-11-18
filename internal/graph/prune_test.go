@@ -2,6 +2,9 @@ package graph
 
 import (
 	"context"
+	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -171,7 +174,7 @@ func TestPruneStepLeavesRecoverableState(t *testing.T) {
 	insertMeta(t, e, "graph_resolve_pending:/wtB", "1")
 	e.clk.(*clock.Fake).Advance(time.Hour)
 
-	done, err := e.pruneStep(ctx, "/wtB", e.clk.Now(), 1)
+	done, err := e.pruneStep(ctx, "/wtB", e.clk.Now(), 1, false)
 	if err != nil || done {
 		t.Fatalf("first step = %v, %v; want false, nil", done, err)
 	}
@@ -190,7 +193,7 @@ func TestPruneStepLeavesRecoverableState(t *testing.T) {
 		t.Errorf("journal rows after first step = %d, want 0", got)
 	}
 
-	done, err = e.pruneStep(ctx, "/wtB", e.clk.Now(), 1)
+	done, err = e.pruneStep(ctx, "/wtB", e.clk.Now(), 1, false)
 	if err != nil || !done {
 		t.Fatalf("second step = %v, %v; want true, nil", done, err)
 	}
@@ -238,7 +241,7 @@ func TestPrunedWorktreeReindexes(t *testing.T) {
 		prune func(e *Engine) error
 	}{
 		{"after one prune step", func(e *Engine) error {
-			_, err := e.pruneStep(context.Background(), "/wtB", e.clk.Now(), 1)
+			_, err := e.pruneStep(context.Background(), "/wtB", e.clk.Now(), 1, false)
 			return err
 		}},
 		{"after the whole prune", func(e *Engine) error {
@@ -353,5 +356,143 @@ func TestMarkUsedNeverMovesBack(t *testing.T) {
 	mark()
 	if got := usedMark(t, e, "/wt"); got != t0.Add(2*time.Hour).UnixMilli() {
 		t.Errorf("mark after a later write = %d, want T0+2h", got)
+	}
+}
+
+// holdWriteLock holds the store's write lock from a separate connection, as
+// another process's write transaction would, until the returned release runs
+// (or the test ends).
+func holdWriteLock(t *testing.T, e *Engine) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+e.st.Path()+"?_pragma=busy_timeout(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("blocker BEGIN IMMEDIATE: %v", err)
+	}
+	released := false
+	release = func() {
+		if !released {
+			released = true
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			_ = conn.Close()
+		}
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func TestNoteUsedRewritesOnlyAnHourOldMark(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	fc := e.clk.(*clock.Fake)
+	t0 := e.clk.Now()
+	note := func() int64 {
+		t.Helper()
+		if err := e.NoteUsed(ctx, "/wt"); err != nil {
+			t.Fatal(err)
+		}
+		return usedMark(t, e, "/wt")
+	}
+	if got := note(); got != t0.UnixMilli() {
+		t.Fatalf("first mark = %d, want T0", got)
+	}
+	fc.Advance(time.Hour)
+	if got := note(); got != t0.UnixMilli() {
+		t.Errorf("mark exactly an hour old was rewritten: %d, want T0", got)
+	}
+	fc.Advance(time.Millisecond)
+	if got, want := note(), t0.Add(time.Hour+time.Millisecond).UnixMilli(); got != want {
+		t.Errorf("mark more than an hour old = %d, want %d", got, want)
+	}
+}
+
+// TestNoteUsedTakesNoWriteLockForARecentMark: with the write lock held
+// elsewhere, a write would fail with SQLITE_BUSY.
+func TestNoteUsedTakesNoWriteLockForARecentMark(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	if err := e.MarkUsed(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	t0 := e.clk.Now()
+	e.clk.(*clock.Fake).Advance(30 * time.Minute)
+	holdWriteLock(t, e)
+	if err := e.NoteUsed(ctx, "/wt"); err != nil {
+		t.Fatalf("NoteUsed with a recent mark: %v", err)
+	}
+	if got := usedMark(t, e, "/wt"); got != t0.UnixMilli() {
+		t.Errorf("mark = %d, want T0", got)
+	}
+}
+
+// TestNoteUsedKeepsAMarkRefreshedSinceItsRead: a second process that read the
+// old mark before the first one rewrote it must not rewrite it again.
+func TestNoteUsedKeepsAMarkRefreshedSinceItsRead(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	fc := e.clk.(*clock.Fake)
+	t0 := e.clk.Now()
+	if err := e.MarkUsed(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	fc.Advance(2 * time.Hour)
+	if err := e.NoteUsed(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	fc.Advance(time.Millisecond)
+	now := e.clk.Now()
+	if err := e.markUsedBefore(ctx, "/wt", now, now.Add(-useMarkInterval)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := usedMark(t, e, "/wt"), t0.Add(2*time.Hour).UnixMilli(); got != want {
+		t.Errorf("mark = %d, want %d (the refreshed mark)", got, want)
+	}
+}
+
+func TestPruneDeadWorktreeStopsWhenItsDirectoryReturnsDuringTheLockWait(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := e.Reconcile(ctx, wt, crossFileCallSource()); err != nil {
+		t.Fatal(err)
+	}
+	usedBefore := e.clk.Now()
+	release := holdWriteLock(t, e)
+
+	type result struct {
+		ok  bool
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ok, err := e.PruneDeadWorktree(ctx, wt, usedBefore)
+		done <- result{ok, err}
+	}()
+	// The batch checks a connection out before its BEGIN IMMEDIATE, so it is
+	// now waiting for the write lock.
+	waitFor(t, "prune never began its transaction", func() bool { return e.st.DB.Stats().InUse > 0 })
+	if err := os.Mkdir(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	select {
+	case r := <-done:
+		if r.err != nil || r.ok {
+			t.Fatalf("PruneDeadWorktree = %v, %v; want false, nil", r.ok, r.err)
+		}
+	case <-time.After(hangTimeout):
+		t.Fatal("PruneDeadWorktree hung")
+	}
+	if got := countRows(t, e, "files", wt); got != 2 {
+		t.Errorf("files of the re-created worktree = %d, want 2", got)
 	}
 }

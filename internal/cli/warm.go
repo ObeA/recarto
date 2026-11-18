@@ -3,6 +3,9 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"time"
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/detach"
@@ -11,12 +14,19 @@ import (
 
 // Warm brings the code graph of every served repo up to date, caches its code
 // map, and drops the graph of dead and unused worktrees. Session start runs it
-// in a detached process, so the hook never waits for an index.
+// in a detached process, so the hook never waits for an index. A worktree that
+// another process is indexing is left to that process.
 func Warm(ctx context.Context, a *app.App) error {
 	var errs []error
 	for _, rc := range a.AllRepos() {
 		wt := rc.Git.Worktree
-		if err := rc.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt)); err != nil {
+		err := rc.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt), graph.WithoutWaiting())
+		if errors.Is(err, graph.ErrIndexing) {
+			// The process indexing this worktree finishes it, and the next
+			// session start caches its map.
+			continue
+		}
+		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -29,7 +39,23 @@ func Warm(ctx context.Context, a *app.App) error {
 	if err == nil {
 		_, err = a.PruneWorktrees(ctx, p)
 	}
-	return errors.Join(append(errs, err)...)
+	return errors.Join(append(errs, err, p.DaysErr)...)
+}
+
+// warmLimit bounds one `recarto warm` run.
+const warmLimit = 30 * time.Minute
+
+// armWarmLimit calls f once warmLimit has passed, unless the returned stop runs
+// first. A var so a test can fire the limit at a moment it picks.
+var armWarmLimit = func(f func()) (stop func() bool) { return time.AfterFunc(warmLimit, f).Stop }
+
+// endWarm ends a warm run that reached warmLimit. A git call or file read that
+// hangs ignores any context, so only ending the process bounds the run. The
+// store and the index lock survive this the same way they survive a crash: what
+// is committed stays, and the next run continues from it.
+func endWarm() {
+	fmt.Fprintf(os.Stderr, "recarto warm: stopped after %v; the next session start continues the index\n", warmLimit)
+	os.Exit(1)
 }
 
 // startWarm starts `recarto warm` in a detached process. A var so tests can

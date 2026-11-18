@@ -29,6 +29,7 @@ func (noopProgress) Done()        {}
 type reconcileOptions struct {
 	progress Progress
 	force    bool
+	noWait   bool
 }
 
 // ReconcileOption configures Reconcile / ReconcileIfStale.
@@ -46,6 +47,10 @@ func WithProgress(p Progress) ReconcileOption {
 func WithForce() ReconcileOption {
 	return func(o *reconcileOptions) { o.force = true }
 }
+
+// WithoutWaiting makes ReconcileIfStale return ErrIndexing at once, without
+// waiting and before any store write, while another process indexes the worktree.
+func WithoutWaiting() ReconcileOption { return func(o *reconcileOptions) { o.noWait = true } }
 
 // resolve applies opts and fills in defaults.
 func (o *reconcileOptions) resolve(opts []ReconcileOption) {

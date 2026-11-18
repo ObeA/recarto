@@ -114,6 +114,11 @@ func Run(args []string, out io.Writer) (rerr error) {
 		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync warm server export import repair)", cmd)
 	}
 
+	if cmd == "warm" {
+		stop := armWarmLimit(endWarm)
+		defer stop()
+	}
+
 	a, err := app.Open(app.Config{})
 	if err != nil {
 		return err

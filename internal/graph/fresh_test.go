@@ -246,3 +246,26 @@ func TestEnsureFreshFailureCooldown(t *testing.T) {
 		t.Fatalf("List calls = %d, want 2 (cooldown elapsed, retry expected)", n)
 	}
 }
+
+func TestEnsureFreshNotesUseHourly(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	fc := e.clk.(*clock.Fake)
+	src := crossFileCallSource()
+	t0 := e.clk.Now()
+	if err := e.ReconcileIfStale(ctx, "/wt", src, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	fc.Advance(30 * time.Minute)
+	if f := e.EnsureFresh(ctx, "/wt", src, "tok", 0); f.State != Fresh {
+		t.Fatalf("state = %v, want Fresh", f.State)
+	}
+	if got := usedMark(t, e, "/wt"); got != t0.UnixMilli() {
+		t.Errorf("mark after a query 30 min later = %d, want T0", got)
+	}
+	fc.Advance(31 * time.Minute)
+	e.EnsureFresh(ctx, "/wt", src, "tok", 0)
+	if got, want := usedMark(t, e, "/wt"), e.clk.Now().UnixMilli(); got != want {
+		t.Errorf("mark after a query 61 min later = %d, want %d", got, want)
+	}
+}

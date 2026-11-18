@@ -99,8 +99,9 @@ func (p *refreshProgress) detail() string {
 // in Detail.
 func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, token string, wait time.Duration) Freshness {
 	// A lost mark only lets the sweep drop this graph sooner, and the next query
-	// re-indexes it; a query must never fail over it.
-	_ = e.MarkUsed(ctx, worktree)
+	// re-indexes it; a query must never fail over it. NoteUsed writes only an
+	// hour-old mark, so most queries take no write lock.
+	_ = e.NoteUsed(ctx, worktree)
 	if e.graphFresh(ctx, worktree, token) {
 		return Freshness{State: Fresh}
 	}

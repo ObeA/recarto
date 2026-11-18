@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/agents/claudecode"
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/features"
 )
@@ -98,6 +100,22 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		check("config", err == nil, detail)
 	}
 
+	// A typo in RECARTO_UNUSED_WORKTREE_DAYS keeps unused worktrees' graphs, unnoticed otherwise.
+	days, err := app.UnusedWorktreeDays()
+	detail := strconv.Itoa(days)
+	if err != nil {
+		detail = err.Error()
+	}
+	check("unused_worktree_days", err == nil, detail)
+
+	// Hooks Claude Code is too old to run do nothing, silently. Like sync, this never fails doctor.
+	home, _ := agents.HomeDir() // without a home directory only the repo's settings are checked
+	if msg := claudeCodeWarning(agents.Paths{Dir: a.Git.Worktree, Home: home}); msg != "" {
+		if _, err := fmt.Fprintf(w, "[warn] claude code: %s\n", msg); err != nil {
+			return err
+		}
+	}
+
 	// Sync reachability is diagnostic only: an unreachable server must never
 	// fail doctor (offline mode is the floor), so this check never flips allOK.
 	if a.Sync == nil {
@@ -174,3 +192,6 @@ func reportLastRepair(ctx context.Context, a *app.App, w io.Writer) {
 		fmt.Fprintf(w, "  %s\n", blob)
 	}
 }
+
+// claudeCodeWarning is claudecode.VersionWarning. A var so tests can fake the Claude Code found.
+var claudeCodeWarning = claudecode.VersionWarning

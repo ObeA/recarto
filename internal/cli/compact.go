@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 )
 
 // Compact runs a compaction/decay pass over this repo's memory store.
-func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) error {
+func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) (rerr error) {
 	fs := flag.NewFlagSet("compact", flag.ContinueOnError)
 	force := fs.Bool("force", false, "ignore the once-per-interval gate")
 	dry := fs.Bool("dry-run", false, "report planned changes without writing")
@@ -24,6 +25,9 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) error 
 	// Graph-side GC runs regardless of the memory gate: a deleted or unused git
 	// worktree keeps its entire graph copy (often the bulk of the store) until swept.
 	wts, err := a.PrunableWorktrees(ctx)
+	// A bad days value must not stop the sweep of deleted worktrees or the memory
+	// pass, so it is reported after both.
+	defer func() { rerr = errors.Join(rerr, wts.DaysErr) }()
 	if err != nil {
 		return err
 	}

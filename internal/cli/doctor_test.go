@@ -5,9 +5,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/gerwim/recarto/internal/agents"
 )
 
 func TestDoctorPasses(t *testing.T) {
+	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "")
 	a := newTestApp(t, "main")
 	for _, tc := range []struct {
 		args  []string
@@ -18,7 +21,7 @@ func TestDoctorPasses(t *testing.T) {
 			t.Fatalf("doctor %v returned error: %v\n%s", tc.args, err, buf.String())
 		}
 		out := buf.String()
-		for _, want := range []string{"[ok] wal", tc.check, "[ok] schema", "[ok] git"} {
+		for _, want := range []string{"[ok] wal", tc.check, "[ok] schema", "[ok] git", "[ok] unused_worktree_days: 7"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("doctor %v missing %q:\n%s", tc.args, want, out)
 			}
@@ -43,5 +46,44 @@ func TestDoctorFailsOnUnresolvedGit(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "[FAIL] git") {
 		t.Errorf("expected [FAIL] git line:\n%s", buf.String())
+	}
+}
+
+func TestDoctorFailsOnBadUnusedDays(t *testing.T) {
+	a := newTestApp(t, "main")
+	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "7d")
+	var buf bytes.Buffer
+	if err := Doctor(context.Background(), a, &buf, []string{"--quick"}); err == nil {
+		t.Fatalf("doctor passed with an invalid RECARTO_UNUSED_WORKTREE_DAYS:\n%s", buf.String())
+	}
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(l, "[FAIL] unused_worktree_days:") {
+			line = l
+		}
+	}
+	if !strings.Contains(line, "RECARTO_UNUSED_WORKTREE_DAYS") || !strings.Contains(line, "0 to 36500") {
+		t.Errorf("want a [FAIL] unused_worktree_days line naming the variable and the range:\n%s", buf.String())
+	}
+}
+
+func TestDoctorWarnsAboutClaudeCodeWithoutFailing(t *testing.T) {
+	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "")
+	a := newTestApp(t, "main")
+	old := claudeCodeWarning
+	t.Cleanup(func() { claudeCodeWarning = old })
+	for _, msg := range []string{"Claude Code 2.1.138 found; too old", ""} {
+		claudeCodeWarning = func(agents.Paths) string { return msg }
+		var buf bytes.Buffer
+		if err := Doctor(context.Background(), a, &buf, []string{"--quick"}); err != nil {
+			t.Fatalf("doctor with warning %q: %v\n%s", msg, err, buf.String())
+		}
+		hasLine := strings.Contains(buf.String(), "claude code")
+		if msg != "" && !strings.Contains(buf.String(), "[warn] claude code: "+msg+"\n") {
+			t.Errorf("want the [warn] claude code line:\n%s", buf.String())
+		}
+		if msg == "" && hasLine {
+			t.Errorf("want no claude code line:\n%s", buf.String())
+		}
 	}
 }
