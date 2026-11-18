@@ -120,35 +120,49 @@ func TestReconcileIfStaleOtherWorktreeNotBlocked(t *testing.T) {
 	}
 }
 
-// TestReconcileIfStaleWithoutWaitingLeavesTheWorktree: while another process
-// indexes the worktree and holds the store's write lock, a no-wait run returns
-// ErrIndexing without writing; a write would fail with SQLITE_BUSY.
-func TestReconcileIfStaleWithoutWaitingLeavesTheWorktree(t *testing.T) {
+// TestReconcileIfIdleLeavesABusyWorktree: while another process indexes the
+// worktree, stuck reading its git state, and the store's write lock is held,
+// ReconcileIfIdle returns ErrIndexing without reading the token or writing; a
+// write would fail with SQLITE_BUSY.
+func TestReconcileIfIdleLeavesABusyWorktree(t *testing.T) {
 	e1, e2 := twoEngines(t)
 	ctx := context.Background()
-	src1 := &gatedSource{inner: crossFileCallSource(), gate: make(chan struct{})}
+	inToken, gate := make(chan struct{}), make(chan struct{})
+	token1 := func() string {
+		close(inToken)
+		<-gate
+		return "tok"
+	}
 	done1 := make(chan error, 1)
-	go func() { done1 <- e1.ReconcileIfStale(ctx, "/wt", src1, "tok") }()
-	waitFor(t, "first reconcile never listed", func() bool { return src1.lists.Load() == 1 })
-	release := holdWriteLock(t, e1)
+	go func() { done1 <- e1.ReconcileIfIdle(ctx, "/wt", crossFileCallSource(), token1) }()
+	select {
+	case <-inToken:
+	case <-time.After(hangTimeout):
+		t.Fatal("first reconcile never read its token")
+	}
+	release := holdWriteLock(t, e2)
 
 	src2 := &gatedSource{inner: crossFileCallSource(), gate: make(chan struct{})}
 	close(src2.gate)
+	token2 := func() string {
+		t.Error("token read while another process indexes the worktree")
+		return "tok"
+	}
 	done2 := make(chan error, 1)
-	go func() { done2 <- e2.ReconcileIfStale(ctx, "/wt", src2, "tok", WithoutWaiting()) }()
+	go func() { done2 <- e2.ReconcileIfIdle(ctx, "/wt", src2, token2) }()
 	select {
 	case err := <-done2:
 		if !errors.Is(err, ErrIndexing) {
-			t.Fatalf("no-wait reconcile = %v, want ErrIndexing", err)
+			t.Fatalf("idle reconcile = %v, want ErrIndexing", err)
 		}
 	case <-time.After(hangTimeout):
-		t.Fatal("no-wait reconcile hung")
+		t.Fatal("idle reconcile hung")
 	}
 	if n := src2.lists.Load(); n != 0 {
-		t.Errorf("no-wait reconcile listed %d times, want 0", n)
+		t.Errorf("idle reconcile listed %d times, want 0", n)
 	}
 
 	release()
-	close(src1.gate)
+	close(gate)
 	awaitErr(t, "first reconcile", done1)
 }

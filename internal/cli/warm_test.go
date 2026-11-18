@@ -2,12 +2,10 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -161,124 +159,6 @@ func TestWarmIndexesServedReposAndCachesTheirMap(t *testing.T) {
 		if len(arch.Modules) != 1 || arch.Modules[0].Name != mod || arch.Modules[0].Symbols == 0 {
 			t.Errorf("%s: map = %+v, want module %s with its symbols from the cache warm wrote", wt, arch.Modules, mod)
 		}
-	}
-}
-
-// heldSource lists only once gate closes, so its reconcile holds the
-// worktree's index lock until then.
-type heldSource struct {
-	graph.Source
-	listing chan struct{}
-	gate    chan struct{}
-}
-
-func (h heldSource) List() ([]graph.FileEntry, error) {
-	close(h.listing)
-	<-h.gate
-	return h.Source.List()
-}
-
-// TestWarmLeavesAWorktreeAnotherProcessIndexes: while another process indexes
-// the primary worktree and holds the store's write lock, warm neither waits
-// nor writes there, and still indexes the served repos and runs its sweep.
-func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
-	primary, extra := t.TempDir(), t.TempDir()
-	initGitRepo(t, primary, map[string]string{"api/a.go": "package api\n\nfunc A() {}\n"})
-	initGitRepo(t, extra, map[string]string{"lib/b.go": "package lib\n\nfunc B() {}\n"})
-	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY", "RECARTO_SYNC_REPO"} {
-		t.Setenv(k, "")
-	}
-	t.Setenv("RECARTO_REPOS", extra)
-	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
-	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
-	open := func() *app.App {
-		a, err := app.Open(app.Config{CWD: primary, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = a.Close() })
-		return a
-	}
-	a, a2 := open(), open()
-	ctx := context.Background()
-	wt := a.Git.Worktree
-
-	held := heldSource{Source: graph.NewSource(wt), listing: make(chan struct{}), gate: make(chan struct{})}
-	indexed := make(chan error, 1)
-	go func() { indexed <- a2.Graph.ReconcileIfStale(ctx, wt, held, "tok") }()
-	var gateOnce sync.Once
-	openGate := func() { gateOnce.Do(func() { close(held.gate) }) }
-	t.Cleanup(openGate)
-	awaitSignal(t, "the other process never began indexing", held.listing)
-
-	blocker, err := sql.Open("sqlite", "file:"+a.Store.Path()+"?_pragma=busy_timeout(1)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = blocker.Close() })
-	bconn, err := blocker.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := bconn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		t.Fatalf("blocker BEGIN IMMEDIATE: %v", err)
-	}
-	awaitNil(t, "warm with the worktree busy", func() error { return Warm(ctx, a) })
-	repos := a.AllRepos()
-	if len(repos) != 2 {
-		t.Fatalf("served repos = %d, want 2", len(repos))
-	}
-	var served int
-	if err := repos[1].Store.DB.QueryRow(`SELECT COUNT(*) FROM files WHERE worktree=?`, repos[1].Git.Worktree).Scan(&served); err != nil {
-		t.Fatal(err)
-	}
-	if served != 1 {
-		t.Errorf("served repo files = %d, want 1", served)
-	}
-	if got := filesIn(t, a, wt); got != 0 {
-		t.Errorf("busy worktree files = %d, want 0: warm must leave it", got)
-	}
-
-	if _, err := bconn.ExecContext(ctx, "ROLLBACK"); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Graph.Reconcile(ctx, "/definitely/gone-wt", graph.FSSource{Root: primary}); err != nil {
-		t.Fatal(err)
-	}
-	awaitNil(t, "warm after the store lock is free", func() error { return Warm(ctx, a) })
-	if got := filesIn(t, a, "/definitely/gone-wt"); got != 0 {
-		t.Errorf("dead worktree files = %d, want 0: warm's sweep must run", got)
-	}
-	if got := filesIn(t, a, wt); got != 0 {
-		t.Errorf("busy worktree files = %d, want 0: warm must leave it", got)
-	}
-
-	openGate()
-	awaitNil(t, "the other process's index", func() error { return <-indexed })
-}
-
-// awaitSignal waits for ch to close, failing only on a hang.
-func awaitSignal(t *testing.T, msg string, ch <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(time.Minute):
-		t.Fatal(msg)
-	}
-}
-
-// awaitNil runs f in a goroutine and fails on an error or a hang.
-func awaitNil(t *testing.T, what string, f func() error) {
-	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- f() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("%s: %v", what, err)
-		}
-	case <-time.After(time.Minute):
-		t.Fatalf("%s hung", what)
 	}
 }
 

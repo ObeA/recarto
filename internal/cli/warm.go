@@ -20,7 +20,9 @@ func Warm(ctx context.Context, a *app.App) error {
 	var errs []error
 	for _, rc := range a.AllRepos() {
 		wt := rc.Git.Worktree
-		err := rc.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt), graph.WithoutWaiting())
+		// The token is read under the index lock: a git call that hangs there keeps
+		// the lock, so later runs leave this worktree instead of hanging in it too.
+		err := rc.Graph.ReconcileIfIdle(ctx, wt, graph.NewSource(wt), func() string { return graph.WorktreeToken(wt) })
 		if errors.Is(err, graph.ErrIndexing) {
 			// The process indexing this worktree finishes it, and the next
 			// session start caches its map.
