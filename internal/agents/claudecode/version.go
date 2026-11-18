@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,11 +78,7 @@ func VersionWarning(p agents.Paths) string {
 	if p.Home != "" {
 		files = append(files, p.UserFile(".claude", "settings.json"))
 	}
-	installed := false
-	for _, f := range files {
-		installed = installed || execFormIn(f)
-	}
-	if !installed {
+	if !slices.ContainsFunc(files, execFormIn) {
 		return ""
 	}
 	v, err := claudeVersion()

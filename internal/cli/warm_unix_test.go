@@ -159,9 +159,10 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	ctx := context.Background()
 	wt := a.Git.Worktree
 
-	// A git status of the busy worktree hangs: a warm that read its git state
-	// before trying the index lock would hang here.
-	hook := `if [ "$1" = -C ] && [ "$2" = '` + wt + `' ] && [ "$3" = status ]; then exec sleep 3600; fi`
+	// A warm that read the busy worktree's git state before trying its index
+	// lock would run this git status; the shim records that instead of hanging.
+	eager := filepath.Join(t.TempDir(), "eager-status")
+	hook := `if [ "$1" = -C ] && [ "$2" = '` + wt + `' ] && [ "$3" = status ]; then : > '` + eager + `'; exit 1; fi`
 	t.Setenv("PATH", gitScript(t, hook)+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	held := heldSource{Source: graph.NewSource(wt), listing: make(chan struct{}), gate: make(chan struct{})}
@@ -214,6 +215,10 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	}
 	if got := filesIn(t, a, wt); got != 0 {
 		t.Errorf("busy worktree files = %d, want 0: warm must leave it", got)
+	}
+
+	if _, err := os.Stat(eager); err == nil {
+		t.Error("warm ran git status for the busy worktree before trying its index lock")
 	}
 
 	openGate()
