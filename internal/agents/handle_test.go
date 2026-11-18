@@ -937,3 +937,33 @@ func TestSessionStartUnfinishedIndexShowsIndexingLine(t *testing.T) {
 		t.Fatalf("finished index: want the map and no indexing line:\n%s", got)
 	}
 }
+
+func TestHookNotesUseHourly(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	clk := a.Clock.(*clock.Fake)
+	mark := func() int64 {
+		t.Helper()
+		if _, err := Handle(ctx, a, Event{Kind: KindAugment, SessionID: "s1", Pattern: "Foo"}); err != nil {
+			t.Fatal(err)
+		}
+		var v int64
+		if err := a.Store.DB.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key=?`,
+			"worktree_used:"+a.Git.Worktree).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	t0 := clk.Now().UnixMilli()
+	if got := mark(); got != t0 {
+		t.Fatalf("mark after the first hook = %d, want T0", got)
+	}
+	clk.Advance(30 * time.Minute)
+	if got := mark(); got != t0 {
+		t.Errorf("mark after a hook 30 min later = %d, want T0", got)
+	}
+	clk.Advance(31 * time.Minute)
+	if got, want := mark(), clk.Now().UnixMilli(); got != want {
+		t.Errorf("mark after a hook 61 min later = %d, want %d", got, want)
+	}
+}

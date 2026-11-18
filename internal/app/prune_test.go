@@ -235,3 +235,78 @@ func TestPrunableWorktreesNDayBoundary(t *testing.T) {
 		}
 	}
 }
+
+func fileCount(t *testing.T, a *App, wt string) int {
+	t.Helper()
+	var n int
+	if err := a.Store.DB.QueryRow(`SELECT COUNT(*) FROM files WHERE worktree=?`, wt).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestHookDuringSweepStopsPrune: a session that comes back to an unused
+// worktree after the sweep chose it writes the mark that stops the prune.
+func TestHookDuringSweepStopsPrune(t *testing.T) {
+	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "")
+	wtOld := t.TempDir()
+	a, fc := openPruneApp(t, wtOld, "/repo")
+	ctx := context.Background()
+	if err := a.Graph.ReconcileIfStale(ctx, wtOld, goSrc(t), "tok"); err != nil {
+		t.Fatal(err)
+	}
+	fc.Advance(8 * 24 * time.Hour)
+	p, err := a.PrunableWorktrees(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unusedNames(p); !sameSet(got, []string{wtOld}) {
+		t.Fatalf("Unused = %v, want [%s]", got, wtOld)
+	}
+	if err := a.Graph.NoteUsed(ctx, wtOld); err != nil {
+		t.Fatal(err)
+	}
+	n, err := a.PruneWorktrees(ctx, p)
+	if err != nil || n != 0 {
+		t.Fatalf("PruneWorktrees = %d, %v; want 0, nil", n, err)
+	}
+	if got := fileCount(t, a, wtOld); got != 1 {
+		t.Errorf("files of the used worktree = %d, want 1", got)
+	}
+}
+
+// TestRecreatedDeadWorktreeKeepsItsGraph: the returning session's mark is too
+// recent to rewrite, so the re-created directory alone must stop the prune.
+func TestRecreatedDeadWorktreeKeepsItsGraph(t *testing.T) {
+	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "")
+	a, fc := openPruneApp(t, "/repo")
+	ctx := context.Background()
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := a.Graph.Reconcile(ctx, wt, goSrc(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.MarkUsed(ctx, wt); err != nil {
+		t.Fatal(err)
+	}
+	fc.Advance(30 * time.Minute)
+	p, err := a.PrunableWorktrees(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(p.Dead, []string{wt}) {
+		t.Fatalf("Dead = %v, want [%s]", p.Dead, wt)
+	}
+	if err := os.Mkdir(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.NoteUsed(ctx, wt); err != nil {
+		t.Fatal(err)
+	}
+	n, err := a.PruneWorktrees(ctx, p)
+	if err != nil || n != 0 {
+		t.Fatalf("PruneWorktrees = %d, %v; want 0, nil", n, err)
+	}
+	if got := fileCount(t, a, wt); got != 1 {
+		t.Errorf("files of the re-created worktree = %d, want 1", got)
+	}
+}

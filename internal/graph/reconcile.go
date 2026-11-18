@@ -540,11 +540,48 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 		return err
 	}
 	err = e.reconcileLocked(ctx, worktree, src, token, o.force, opts...)
+	return e.finishLocked(ctx, worktree, src, release, err)
+}
+
+// ErrIndexing is ReconcileIfIdle's answer while another process indexes the
+// worktree; that process brings it up to date.
+var ErrIndexing = errors.New("another process is indexing this worktree")
+
+// ReconcileIfIdle is ReconcileIfStale for a caller that must not wait. While
+// another process indexes worktree it returns ErrIndexing at once, having run
+// no git command and written nothing: that process may hold the store's write
+// lock for a whole resolve. Otherwise it reads the worktree's git state (token)
+// only once it holds the index lock, so a git call that hangs keeps the lock
+// and every later caller moves on instead of hanging in the same call.
+func (e *Engine) ReconcileIfIdle(ctx context.Context, worktree string, src Source, token func() string, opts ...ReconcileOption) error {
+	release, ok, err := store.TryLockFile(e.indexLockPath(worktree))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrIndexing
+	}
+	var o reconcileOptions
+	o.resolve(opts)
+	// As in ReconcileIfStale, the mark comes before the reconcile's reads, so a
+	// concurrent prune of this worktree stops.
+	err = e.MarkUsed(ctx, worktree)
+	if err == nil {
+		err = e.reconcileLocked(ctx, worktree, src, token(), o.force, opts...)
+	}
+	return e.finishLocked(ctx, worktree, src, release, err)
+}
+
+// finishLocked ends a ReconcileIfStale or ReconcileIfIdle run that holds worktree's index lock,
+// given the run's error so far.
+func (e *Engine) finishLocked(ctx context.Context, worktree string, src Source, release func(), err error) error {
 	if err == nil {
 		// An edit the post-edit hook left to the lock holder goes in before this run ends.
 		err = e.drainDeferred(ctx, worktree, src)
 	}
 	release()
+	// After the release: a post-edit hook that found the lock held left its edit
+	// to the holder.
 	return errors.Join(err, e.takeDeferred(ctx, worktree))
 }
 

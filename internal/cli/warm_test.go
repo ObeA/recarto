@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,5 +159,33 @@ func TestWarmIndexesServedReposAndCachesTheirMap(t *testing.T) {
 		if len(arch.Modules) != 1 || arch.Modules[0].Name != mod || arch.Modules[0].Symbols == 0 {
 			t.Errorf("%s: map = %+v, want module %s with its symbols from the cache warm wrote", wt, arch.Modules, mod)
 		}
+	}
+}
+
+func TestWarmBadUnusedDaysStillPrunesDead(t *testing.T) {
+	wtOld, own := t.TempDir(), t.TempDir()
+	a := newPruneApp(t, wtOld, own)
+	a.Git.Worktree = own
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(own, "a.go"), []byte("package p\nfunc A(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := graph.FSSource{Root: own}
+	for _, wt := range []string{own, wtOld, "/definitely/gone-wt"} {
+		if err := a.Graph.Reconcile(ctx, wt, src); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.Clock.(*clock.Fake).Advance(10 * 24 * time.Hour)
+	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "7d")
+
+	if err := Warm(ctx, a); err == nil || !strings.Contains(err.Error(), "RECARTO_UNUSED_WORKTREE_DAYS") {
+		t.Fatalf("Warm error = %v, want one naming RECARTO_UNUSED_WORKTREE_DAYS", err)
+	}
+	if got := filesIn(t, a, "/definitely/gone-wt"); got != 0 {
+		t.Errorf("dead worktree files = %d, want 0", got)
+	}
+	if got := filesIn(t, a, wtOld); got != 1 {
+		t.Errorf("unused worktree files = %d, want 1", got)
 	}
 }

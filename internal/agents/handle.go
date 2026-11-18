@@ -3,8 +3,8 @@ package agents
 import (
 	"context"
 	"fmt"
-	"os"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,9 +23,11 @@ import (
 // neutral result. It is exit-0 advisory: callers treat any returned error as
 // non-blocking. RunHook always encodes the (possibly partial) Result first.
 func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
-	// Every hook that reaches the store counts as use of its worktree. A lost
-	// mark only lets the sweep drop this graph sooner; the next use re-indexes it.
-	_ = a.Graph.MarkUsed(ctx, a.Git.Worktree)
+	// Every hook that reaches the store counts as use of its worktree; NoteUsed
+	// writes only an hour-old mark, so a hook that otherwise reads takes no write
+	// lock. A lost mark only lets the sweep drop this graph sooner; the next use
+	// re-indexes it.
+	_ = a.Graph.NoteUsed(ctx, a.Git.Worktree)
 	switch ev.Kind {
 	case KindSessionStart:
 		return handleSessionStart(ctx, a, ev)

@@ -271,18 +271,28 @@ func TestCompactUnusedOffPrunesOnlyDead(t *testing.T) {
 	}
 }
 
-// TestCompactRejectsBadUnusedDays: an invalid setting fails compact with a
-// message naming the variable, and nothing is pruned.
-func TestCompactRejectsBadUnusedDays(t *testing.T) {
+// TestCompactBadUnusedDaysStillPrunesDead: an invalid setting still drops
+// deleted worktrees, keeps unused ones as 0 does, runs the memory compaction,
+// and then fails compact with a message naming the variable.
+func TestCompactBadUnusedDaysStillPrunesDead(t *testing.T) {
 	for _, v := range []string{"abc", "-1", "106752"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "")
 			s := seedUnusedWorktrees(t)
+			if err := s.a.Graph.Reconcile(context.Background(), "/definitely/gone-wt", graph.FSSource{Root: s.wtOld}); err != nil {
+				t.Fatal(err)
+			}
 			t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", v)
 			var out bytes.Buffer
 			err := Compact(context.Background(), s.a, &out, []string{"--force"})
 			if err == nil || !strings.Contains(err.Error(), "RECARTO_UNUSED_WORKTREE_DAYS") {
 				t.Fatalf("Compact error = %v, want one naming RECARTO_UNUSED_WORKTREE_DAYS", err)
+			}
+			if got := deadFiles(t, s.a); got != 0 {
+				t.Errorf("dead worktree files = %d, want 0", got)
+			}
+			if !strings.Contains(out.String(), "epoch:") {
+				t.Errorf("output %q should report the memory compaction", out.String())
 			}
 			for _, wt := range []string{s.wtOld, s.wtRecent, s.wtLegacy, "/repo"} {
 				if got := worktreeFiles(t, s.a, wt); got != 1 {

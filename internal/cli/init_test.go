@@ -55,3 +55,26 @@ func TestInitInvalidScopeErrors(t *testing.T) {
 		t.Error("expected error for invalid scope")
 	}
 }
+
+func TestInitPrintsTheClaudeCodeNote(t *testing.T) {
+	old := claudeCodeNote
+	t.Cleanup(func() { claudeCodeNote = old })
+	run := func(note, agent string) []string {
+		t.Helper()
+		claudeCodeNote = func() string { return note }
+		var out bytes.Buffer
+		if err := Init(&out, t.TempDir(), "recarto", []string{"--agent", agent, "--scope", "repo"}); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	}
+	if lines := run("warning: X", "claude"); len(lines) != 3 || !strings.HasPrefix(lines[1], "  claude") || lines[2] != "  warning: X" {
+		t.Errorf("claude init output = %q, want the note right after the claude line", lines)
+	}
+	if lines := run("warning: X", "opencode"); len(lines) != 2 {
+		t.Errorf("opencode init output = %q, want no note", lines)
+	}
+	if lines := run("", "claude"); len(lines) != 2 {
+		t.Errorf("init output with no note = %q, want the header and the agent line", lines)
+	}
+}

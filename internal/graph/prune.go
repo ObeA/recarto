@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -52,19 +53,49 @@ func (e *Engine) Worktrees(ctx context.Context) ([]string, error) {
 // The mark never moves backwards: a write landing late from a process whose
 // clock read was earlier must not hide a newer use from the prune guard.
 func (e *Engine) MarkUsed(ctx context.Context, worktree string) error {
-	now := e.clk.Now().UnixMilli()
+	now := e.clk.Now()
+	return e.markUsedBefore(ctx, worktree, now, now)
+}
+
+// useMarkInterval is how old a worktree's use mark gets before a hook or graph
+// query writes a new one. An unused worktree's cutoff is at least a day, so a
+// worktree in use never looks unused, and most hooks only read.
+const useMarkInterval = time.Hour
+
+// NoteUsed is MarkUsed for hooks and graph queries. It writes only when the
+// worktree has no mark or its mark is more than useMarkInterval old, so most
+// calls take no write lock. A sweep picks an unused worktree only when its mark
+// is at least a day old, so a session that comes back during that prune writes
+// the mark that stops it. A deleted worktree's prune stops when its directory
+// comes back (PruneDeadWorktree).
+func (e *Engine) NoteUsed(ctx context.Context, worktree string) error {
+	now := e.clk.Now()
+	cutoff := now.Add(-useMarkInterval)
+	recent, err := usedSince(ctx, e.st.DB, worktree, cutoff)
+	if err != nil || recent {
+		return err
+	}
+	return e.markUsedBefore(ctx, worktree, now, cutoff)
+}
+
+// markUsedBefore writes now as worktree's use mark unless the stored mark is
+// at or after cutoff. A write landing late from a process whose clock read was
+// earlier then never hides a newer use, and a mark another process refreshed
+// after the caller read it stays.
+func (e *Engine) markUsedBefore(ctx context.Context, worktree string, now, cutoff time.Time) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx,
 			`INSERT INTO meta(key, value) VALUES (?, ?)
 			 ON CONFLICT(key) DO UPDATE SET value = excluded.value
-			 WHERE CAST(meta.value AS INTEGER) < CAST(excluded.value AS INTEGER)`,
-			usedKeyPrefix+worktree, strconv.FormatInt(now, 10))
+			 WHERE CAST(meta.value AS INTEGER) < ?`,
+			usedKeyPrefix+worktree, strconv.FormatInt(now.UnixMilli(), 10), cutoff.UnixMilli())
 		return err
 	})
 }
 
 // usedSince reports whether worktree's use mark is at or after t. It is the
-// one rule both the prune guard and WorktreesUsedBefore (its negation) apply.
+// one rule both the prune guard and WorktreesUsedBefore (its negation) apply;
+// NoteUsed applies it too.
 func usedSince(ctx context.Context, c store.Conn, worktree string, t time.Time) (bool, error) {
 	var v int64
 	err := c.QueryRowContext(ctx,
@@ -117,8 +148,19 @@ func (e *Engine) WorktreesUsedBefore(ctx context.Context, cutoff time.Time) ([]W
 // re-indexes cleanly, and one with files left is still listed, so the next
 // sweep resumes it. Memories, sessions and every non-graph table stay.
 func (e *Engine) PruneWorktree(ctx context.Context, worktree string, usedBefore time.Time) (bool, error) {
+	return e.prune(ctx, worktree, usedBefore, false)
+}
+
+// PruneDeadWorktree is PruneWorktree for a worktree whose directory was gone
+// when the sweep chose it. It also stops, reporting false, once the directory
+// exists again: a session there may hold a mark too recent for it to rewrite.
+func (e *Engine) PruneDeadWorktree(ctx context.Context, worktree string, usedBefore time.Time) (bool, error) {
+	return e.prune(ctx, worktree, usedBefore, true)
+}
+
+func (e *Engine) prune(ctx context.Context, worktree string, usedBefore time.Time, dead bool) (bool, error) {
 	for {
-		done, err := e.pruneStep(ctx, worktree, usedBefore, pruneBatchFiles)
+		done, err := e.pruneStep(ctx, worktree, usedBefore, pruneBatchFiles, dead)
 		if errors.Is(err, errWorktreeUsed) {
 			return false, nil
 		}
@@ -140,7 +182,7 @@ func (e *Engine) PruneWorktree(ctx context.Context, worktree string, usedBefore 
 // re-created files journal nothing. The last batch drops the remaining meta in
 // the same transaction, so no committed state has the files gone and the meta
 // pending.
-func (e *Engine) pruneStep(ctx context.Context, worktree string, usedBefore time.Time, batch int) (bool, error) {
+func (e *Engine) pruneStep(ctx context.Context, worktree string, usedBefore time.Time, batch int, dead bool) (bool, error) {
 	done := false
 	err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		used, err := usedSince(ctx, c, worktree, usedBefore)
@@ -149,6 +191,15 @@ func (e *Engine) pruneStep(ctx context.Context, worktree string, usedBefore time
 		}
 		if used {
 			return errWorktreeUsed
+		}
+		if dead {
+			// Checked under the batch's write lock: a directory that comes back while
+			// the batch waits for the lock stops the prune before it deletes anything.
+			// Anything but a missing directory keeps the graph, the same test
+			// PrunableWorktrees applies when it chooses dead worktrees.
+			if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+				return errWorktreeUsed
+			}
 		}
 		if _, err := c.ExecContext(ctx, `DELETE FROM meta WHERE key IN (?, ?)`,
 			graphTokenKey+worktree, archCacheKey+worktree); err != nil {

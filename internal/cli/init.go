@@ -54,9 +54,19 @@ func Init(out io.Writer, dir, binary string, args []string) error {
 			return err
 		}
 		fmt.Fprintf(out, "  %-9s mcp:%s hooks:%s docs:%s\n", res.Agent, res.MCP, res.Hooks, res.Docs)
+		if res.Agent == "claude" {
+			if note := claudeCodeNote(); note != "" {
+				if _, err := fmt.Fprintf(out, "  %s\n", note); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
+
+// claudeCodeNote is claudecode.VersionNote. A var so tests can fake the Claude Code found.
+var claudeCodeNote = claudecode.VersionNote
 
 // installAgent runs the installer for one agent host name.
 func installAgent(name string, p agents.Paths, binary string) (agents.InstallResult, error) {
